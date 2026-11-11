@@ -69,6 +69,13 @@ impl KernelHandler {
     }
 }
 
+/// 事件发出时刻（Unix 微秒），供控制面测量端到端延迟。
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |value| value.as_micros() as u64)
+}
+
 /// 把处理器错误拆成事件载荷需要的 `code` / `message`。
 fn error_parts(error: &IpcError) -> (String, String) {
     match error {
@@ -118,6 +125,7 @@ impl Handler for KernelHandler {
                         "state": "applied",
                         "version": value.get("version").cloned().unwrap_or(Value::Null),
                         "rules": value.get("rules").cloned().unwrap_or(Value::Null),
+                        "ts_us": now_us(),
                     }),
                 );
                 Ok(value)
@@ -126,7 +134,12 @@ impl Handler for KernelHandler {
                 let (code, message) = error_parts(&error);
                 events.send(
                     "reload",
-                    json!({ "state": "rejected", "code": code, "message": message }),
+                    json!({
+                        "state": "rejected",
+                        "code": code,
+                        "message": message,
+                        "ts_us": now_us(),
+                    }),
                 );
                 Err(error)
             }

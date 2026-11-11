@@ -126,6 +126,13 @@ mod imp {
         )
     }
 
+    /// 事件接收时刻（Unix 微秒），与内核 `ts_us` 相减即端到端延迟。
+    fn now_us() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |value| value.as_micros() as u64)
+    }
+
     /// 把内核推送的事件打印出来；连接关闭后任务自行退出。
     fn spawn_event_printer(client: &PipeClient) {
         let mut events = client.events();
@@ -133,7 +140,7 @@ mod imp {
             loop {
                 match events.recv().await {
                     Ok(Message::Event { kind, payload, .. }) => {
-                        println!("event {kind}: {payload}");
+                        println!("event {kind} received_us={} payload={payload}", now_us());
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
@@ -179,22 +186,20 @@ mod imp {
                     if import_source(&args, &store, &mut source_hash) {
                         pending = true;
                     }
-                    if let Some(outcome) = reload_if_pending(&mut link, pending).await {
-                        match outcome {
-                            Ok(value) => {
-                                pending = false;
-                                println!("reload applied {value}");
-                            }
-                            Err(error) => {
-                                link.mark(&error);
-                                if is_connection_error(&error) {
-                                    println!("reload deferred until reconnect: {error}");
-                                } else {
-                                    // 内核拒绝：重试同一份配置没有意义，等源变化再试。
-                                    pending = false;
-                                    println!("kernel_rejected: {error}");
-                                }
-                            }
+                    match tick(&mut link, pending).await {
+                        TickOutcome::Idle => {}
+                        TickOutcome::Applied(value) => {
+                            pending = false;
+                            println!("reload applied {value}");
+                        }
+                        TickOutcome::ConnectionLost(error) => {
+                            link.mark(&error);
+                            println!("ipc lost, reload pending={pending}: {error}");
+                        }
+                        TickOutcome::Rejected(error) => {
+                            // 内核拒绝：重试同一份配置没有意义，等源变化再试。
+                            pending = false;
+                            println!("kernel_rejected: {error}");
                         }
                     }
                 }
@@ -226,13 +231,37 @@ mod imp {
         Ok(())
     }
 
-    /// 仅在有待应用配置时才发 `reload`，避免空转请求。
-    async fn reload_if_pending(link: &mut Link, pending: bool) -> Option<Result<Value, IpcError>> {
-        if !pending {
-            return None;
+    /// 单个 tick 的结果。
+    enum TickOutcome {
+        /// 无连接或无事可做。
+        Idle,
+        /// reload 成功。
+        Applied(Value),
+        /// 连接层失败：需要丢弃连接并退避重连。
+        ConnectionLost(IpcError),
+        /// 内核拒绝了配置：重试同一份配置没有意义。
+        Rejected(IpcError),
+    }
+
+    /// 每 tick 先探活，再有 pending 时补发 reload。
+    ///
+    /// 没有心跳时，内核退出后 sidecar 会一直持有已失效的连接对象，
+    /// 直到下一次 reload 才暴露；`status` 请求开销可忽略（p99 307 µs）。
+    async fn tick(link: &mut Link, pending: bool) -> TickOutcome {
+        let Some(client) = link.ensure().await else {
+            return TickOutcome::Idle;
+        };
+        if let Err(error) = client.request("status", json!({})).await {
+            return TickOutcome::ConnectionLost(error);
         }
-        let client = link.ensure().await?;
-        Some(client.request("reload", json!({})).await)
+        if !pending {
+            return TickOutcome::Idle;
+        }
+        match client.request("reload", json!({})).await {
+            Ok(value) => TickOutcome::Applied(value),
+            Err(error) if is_connection_error(&error) => TickOutcome::ConnectionLost(error),
+            Err(error) => TickOutcome::Rejected(error),
+        }
     }
 
     /// 读取源文件并在变化时写入新快照；返回是否需要 reload。
