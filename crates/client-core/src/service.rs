@@ -17,7 +17,6 @@ mod imp {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use clap::Parser;
     use tokio::sync::watch;
     use windows_service::service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
@@ -32,6 +31,11 @@ mod imp {
     pub const SERVICE_NAME: &str = "McloudCore";
 
     static SHUTDOWN: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    /// `main` 已解析好的命令行配置。
+    ///
+    /// SCM 传给 `ServiceMain` 的 `arguments` 只有服务名，binPath 中的参数
+    /// 在进程命令行里，因此不能靠回调参数重建配置。
+    static CONFIG: OnceLock<Config> = OnceLock::new();
 
     define_windows_service!(ffi_service_main, service_main);
 
@@ -40,7 +44,8 @@ mod imp {
     /// # Errors
     ///
     /// 进程不是由 SCM 启动时返回错误（例如在控制台直接运行 `--service`）。
-    pub fn run(_config: Config) -> Result<()> {
+    pub fn run(config: Config) -> Result<()> {
+        let _ = CONFIG.set(config);
         service_dispatcher::start(SERVICE_NAME, ffi_service_main)
             .map_err(|error| anyhow::anyhow!("service dispatcher: {error}"))
     }
@@ -51,7 +56,7 @@ mod imp {
         }
     }
 
-    fn run_service(arguments: Vec<OsString>) -> Result<()> {
+    fn run_service(_arguments: Vec<OsString>) -> Result<()> {
         let status_handle = service_control_handler::register(SERVICE_NAME, handle_control)
             .map_err(|error| anyhow::anyhow!("register control handler: {error}"))?;
 
@@ -70,10 +75,10 @@ mod imp {
         let (tx, rx) = watch::channel(false);
         let _ = SHUTDOWN.set(tx);
 
-        // SCM 传入的 arguments 不含程序名，补上以满足 clap 的解析约定。
-        let mut argv: Vec<OsString> = vec![OsString::from("client-core")];
-        argv.extend(arguments);
-        let config = Config::parse_from(argv);
+        let config = CONFIG
+            .get()
+            .context("service config not initialized before dispatcher")?
+            .clone();
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
