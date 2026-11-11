@@ -50,8 +50,10 @@ sidecar: 拉取订阅 → schema/规则校验 → 写 snapshots/<seq>.json + 更
 约束：
 
 - 快照目录 `%ProgramData%\McloudClient\snapshots\`，服务账户可写、用户只读；
+- **原子写**：`<seq>.json.tmp` → `fsync` → `rename`；`current.txt` 单独原子替换；
 - 保留最近 5 个版本，支持一键回滚到上一版本；
-- 内核启动时若无 `current`，以退出码 2 结束，由服务重启并上报，不允许空配置启动；
+- **引导快照**：安装包内置最小快照（仅 `DIRECT`）；内核启动时若无 `current` 则回退到它，仍无则以退出码 2 结束，由服务重启并上报，不允许空配置启动；
+- **失败分类**：`fetch_failed` / `validate_failed` / `kernel_rejected` 三态分开上报，指数退避重试；拉取失败不阻塞数据面；
 - sidecar 崩溃不影响内核：内核已加载的 router 与快照均在本地。
 
 ## 3. 日志归属：内核写环形文件
