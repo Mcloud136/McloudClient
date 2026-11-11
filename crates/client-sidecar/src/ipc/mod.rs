@@ -29,6 +29,8 @@ pub struct EventSink {
 }
 
 impl EventSink {
+    /// 仅 Windows 管道实现会构造 sink；其他平台 `send` 仍可用。
+    #[cfg(windows)]
     pub(crate) fn new(tx: tokio::sync::mpsc::Sender<Message>) -> Self {
         Self {
             tx,
