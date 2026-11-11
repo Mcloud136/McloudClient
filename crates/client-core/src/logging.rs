@@ -149,8 +149,18 @@ pub fn init(log_dir: Option<PathBuf>) -> Result<WorkerGuard> {
         .try_init()
         .map_err(|error| anyhow::anyhow!("install tracing subscriber: {error}"))?;
 
+    install_panic_hook();
     tracing::info!(dir = %dir.display(), max_bytes = MAX_BYTES, keep = KEEP, "file logging ready");
     Ok(guard)
+}
+
+/// panic 先写日志再交给默认 hook：服务模式下 stderr 不可见，否则崩溃无迹可查。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "thread panicked");
+        default_hook(info);
+    }));
 }
 
 /// 日志文件是否落在给定目录下（用于测试与服务启动自检）。
