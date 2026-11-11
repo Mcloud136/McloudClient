@@ -211,6 +211,39 @@ mod tests {
     }
 
     #[test]
+    fn rotates_at_real_threshold_and_caps_disk_usage() {
+        let dir = temp_dir("real");
+        let mut writer = RollingWriter::new(&dir, "core", MAX_BYTES, KEEP).expect("writer");
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..12 {
+            writer.write_all(&chunk).expect("write");
+        }
+        writer.flush().expect("flush");
+
+        // 12 MiB 写入跨越一次 10 MiB 阈值：当前文件 2 MiB + 历史文件 10 MiB。
+        assert_eq!(
+            fs::metadata(dir.join("core.log")).expect("current").len(),
+            2 * 1024 * 1024
+        );
+        assert_eq!(
+            fs::metadata(dir.join("core.1.log")).expect("history").len(),
+            MAX_BYTES
+        );
+
+        let total: u64 = fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").path())
+            .map(|path| fs::metadata(path).expect("meta").len())
+            .sum();
+        assert_eq!(total, 12 * 1024 * 1024);
+        assert!(
+            total <= MAX_BYTES * KEEP as u64,
+            "磁盘上限必须成立: {total}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn appends_to_existing_file() {
         let dir = temp_dir("append");
         fs::create_dir_all(&dir).expect("dir");
