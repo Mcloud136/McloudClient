@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/client-core"]
+
+# 与 v2node-rust 保持同一套硬门禁；客户端代码不得引入 unsafe。
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+ignored_unit_patterns = "deny"
+manual_let_else = "deny"

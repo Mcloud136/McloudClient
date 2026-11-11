@@ -1,0 +1,9 @@
+/target
+/.workbuddy
+
+# 本地订阅与测试产物，不入库
+/profiles/*.json
+*.log
+
+# 内部交接文档：含运维拓扑与主机别名，不入库
+/docs/HANDOVER.md
