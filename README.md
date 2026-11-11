@@ -4,7 +4,9 @@
 
 用户侧客户端（Rust），与节点服务端 [`v2node-rust`](https://github.com/Mcloud136/v2node-rust) 分离维护。
 
-当前阶段：`crates/client-core` 数据面 PoC —— SOCKS5 入站 → 规则分流 → VLESS/WS/TLS/mlkem 出站。
+当前阶段：C0 收口。`client-core` 是完整数据面（SOCKS5 入站 → 规则分流 → VLESS/WS/TLS/mlkem 出站），
+`client-sidecar` 是控制面（订阅 URL 拉取、快照推送、IPC、崩溃重连），内核可作为 Windows 服务运行
+（自动启动 + 崩溃重启）。TUN 与 GUI 尚未启动，见 `docs/client-design-plan.md`。
 
 ## 与 v2node-rust 的关系
 
@@ -45,7 +47,9 @@ cargo run -p client-core -- --profile <profile.json> --reload-interval 2
 
 | 路径 | 说明 |
 |---|---|
-| `crates/client-core/` | 数据面：SOCKS5、VLESS 出站、规则引擎、DNS、rule-set、健康检查、热重载 |
+| `crates/client-core/` | 数据面：SOCKS5、VLESS 出站、规则引擎、DNS、rule-set、健康检查、热重载、文件日志、Windows 服务入口 |
+| `crates/client-sidecar/` | 控制面：IPC 帧协议与命名管道、事件推送、快照存储、订阅拉取、崩溃重连 |
+| `scripts/install-service.sh` | 安装/卸载 Windows 服务（自动启动 + `sc failure` 崩溃重启 + 快照路径） |
 | `scripts/` | `clash2profile.py`、GEO 数据更新、DNS/UDP 端到端测试、C0a 采集脚本 |
 | `docs/` | 客户端设计规划、G1 门控、C0a 分布数据、C0d 实测报告、ADR |
 

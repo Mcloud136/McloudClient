@@ -19,7 +19,7 @@
 | C0e 性能基线 | 三层基准 + 四维指标 | **完成** | `docs/benchmark-results/`（L1/L2/L3/criterion/总报告） |
 | Go 内核对照组 | 同机同规则集同负载跑 W1–W10 | **阻塞 → 部分就绪** | 构建机 `<BUILD_HOST_IP>` 现已可达（SSH root + 面板密钥），但 `go` 未安装；需先装 Go + 拉取 Mihomo/sing-box 二进制，约 2–3 人日 |
 | 许可评审 | 正式结论 | **待评审** | 事实与待确认项见本文 §3；本文不是法律意见 |
-| 内核路线决定 | Mihomo / sing-box / 自研 R2 | **待决定** | 对比见 `docs/client-design-plan.md` §3，决定时点为 G1 |
+| 内核路线决定 | Mihomo / sing-box / 自研 R2 | **已定：自研 R2**（ADR 0001，2026-11-12） | 双进程 + Windows 服务已实机验证；本行结论需在 G1 评审中追认，对比见 `docs/client-design-plan.md` §3 |
 | 用户投诉分布 | 是否集中在客户端侧卡顿 / 重连 / DNS | **未采集** | 属用户侧运营数据，需用户提供 |
 
 ---
