@@ -72,6 +72,14 @@ install() {
                 > "$snapshot_unix/live.json"
         fi
     fi
+    # Keep the store consistent (current + versioned file), otherwise the
+    # sidecar's bootstrap rewrites live.json with the DIRECT fallback and the
+    # data plane briefly leaks direct connections on first start.
+    if [[ ! -f "$snapshot_unix/current.txt" ]]; then
+        cp "$snapshot_unix/live.json" "$snapshot_unix/0000.json"
+        printf '0' > "$snapshot_unix/current.txt"
+    fi
+
     snapshot_win="$(cygpath -w "$snapshot_unix")"
 
     local bin_path
