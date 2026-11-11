@@ -126,10 +126,13 @@ pub trait IpcTransport: Send + Sync {
 | 事件延迟 | P50 **107 µs** / Max **178 µs**（8 样本） | 通过（预算 50 ms，余量约 280×） |
 | 空闲开销 | sidecar **0.391%** / 内核 **0.078%**（20 s，心跳 1 s） | 通过（预算 0.5%），**余量偏小** |
 | 跨会话可用 | 用户会话进程连服务并取回 `status`（7/7） | 通过 |
-| 崩溃取证 | 强杀后日志尾部完整；panic 路径未实测 | 部分通过 |
+| 崩溃取证 | **panic 路径已实测**（`panic_probe`，RC=101，日志含 `thread panicked panic=...`）；强杀不触发 flush | 通过（panic 路径） |
+| 标准用户 ACL | INTERACTIVE 组 `mask=0x001F01FF`；Authenticated Users / Everyone 均为 0；无个人 SID ACE | ACL 结构正确，端到端未登录实测 |
 
 余量提示：空闲 CPU 0.391% 接近 0.5% 预算，主因是每秒一次 `status` 心跳（Debug 构建）。若需更大余量，可改为 `PipeClient::is_closed()`（reader 任务退出时置位，零 IPC），但会失去「连接存在但对端无响应」的检测能力。
 
-崩溃取证的限制：`WorkerGuard` 只在正常退出或 unwind 时 flush；`TerminateProcess`（`taskkill /F`）不执行 drop，缓冲区末尾可能丢失。ADR 原文的「panic 前最后一条」对 panic 路径成立，对强杀不成立。
+崩溃取证的范围：panic（unwind）路径由 `WorkerGuard` drop 保证 flush，已用 `panic_probe` 实测；`taskkill /F`（TerminateProcess）不执行 drop，缓冲区末尾可能丢失，属机制边界而非实现缺陷。
+
+标准用户的验证方式：本机安全策略禁止 `ConvertTo-SecureString`，`runas` 又需要交互输入，无法以标准用户登录运行进程。改为读取服务创建的真实管道 DACL 并按 SID 计算有效权限：`GetEffectiveRightsFromAcl` 只做 ACE 与 SID 的直接匹配、不展开组，因此标准用户 SID 直接匹配为 0 恰好证明 ACL 不含个人 ACE，跨会话完全依赖 `IU` 组。
 
 未达标的处理顺序：先优化帧大小与批量合并，仍不达标再按 §1 的触发条件替换指标通道。
