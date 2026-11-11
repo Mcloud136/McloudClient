@@ -46,18 +46,7 @@ async fn main() -> Result<()> {
     // 控制面接口：仅在显式指定管道名时启用，缺省不改变原有行为。
     if let Some(pipe) = &config.ipc_pipe {
         if let Some(source) = source.clone() {
-            let pipe_name = pipe.clone();
-            let handler = Arc::new(client_core::ipc::KernelHandler::new(
-                Arc::clone(&context),
-                source,
-                Arc::clone(&geo),
-            ));
-            tracing::info!(pipe = %pipe_name, "ipc server listening");
-            drop(tokio::spawn(async move {
-                if let Err(error) = client_sidecar::ipc::pipe::serve(&pipe_name, handler).await {
-                    tracing::error!(%error, "ipc server stopped");
-                }
-            }));
+            client_core::ipc::spawn(pipe.clone(), Arc::clone(&context), source, Arc::clone(&geo));
         } else {
             tracing::warn!("--ipc-pipe ignored in single-node mode");
         }

@@ -2,14 +2,15 @@
 //!
 //! 用法：cargo run -p client-sidecar --example ipc_bench -- '\\.\pipe\name' 1000
 
-use std::time::Instant;
-
-use client_sidecar::IpcTransport;
-use client_sidecar::ipc::pipe::PipeClient;
-use serde_json::json;
-
+#[cfg(windows)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+
+    use client_sidecar::IpcTransport;
+    use client_sidecar::ipc::pipe::PipeClient;
+    use serde_json::json;
+
     let name = std::env::args()
         .nth(1)
         .ok_or("usage: ipc_bench <pipe> [n]")?;
@@ -45,4 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     client.close().await;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("ipc_bench requires Windows (named pipes)");
 }

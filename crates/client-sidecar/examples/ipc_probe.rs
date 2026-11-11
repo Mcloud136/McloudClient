@@ -2,12 +2,13 @@
 //!
 //! 用法：cargo run -p client-sidecar --example ipc_probe -- '\\.\pipe\name'
 
-use client_sidecar::IpcTransport;
-use client_sidecar::ipc::pipe::PipeClient;
-use serde_json::json;
-
+#[cfg(windows)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use client_sidecar::IpcTransport;
+    use client_sidecar::ipc::pipe::PipeClient;
+    use serde_json::json;
+
     let name = std::env::args()
         .nth(1)
         .ok_or("usage: ipc_probe <pipe-name>")?;
@@ -26,4 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     client.close().await;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("ipc_probe requires Windows (named pipes)");
 }

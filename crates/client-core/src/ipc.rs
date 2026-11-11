@@ -84,3 +84,25 @@ impl Handler for KernelHandler {
         }
     }
 }
+
+/// 启动 IPC 服务。仅 Windows 实现；其他平台记录告警并忽略。
+#[cfg(windows)]
+pub fn spawn(pipe: String, context: Arc<AppContext>, source: reload::Source, geo: Arc<GeoData>) {
+    let handler = Arc::new(KernelHandler::new(context, source, geo));
+    tracing::info!(pipe = %pipe, "ipc server listening");
+    drop(tokio::spawn(async move {
+        if let Err(error) = client_sidecar::ipc::pipe::serve(&pipe, handler).await {
+            tracing::error!(%error, "ipc server stopped");
+        }
+    }));
+}
+
+#[cfg(not(windows))]
+pub fn spawn(
+    _pipe: String,
+    _context: Arc<AppContext>,
+    _source: reload::Source,
+    _geo: Arc<GeoData>,
+) {
+    tracing::warn!("--ipc-pipe is only supported on Windows");
+}
