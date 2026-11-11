@@ -22,7 +22,7 @@
 | 版本 | 每条消息带 `v` 字段；不兼容变更递增主版本，旧版本拒绝并给出错误码 |
 | 请求/响应 | `id` 关联；超时 3 s；服务端幂等 |
 | 事件推送 | 单向，无 `id`；有界队列，满时丢弃最旧并计数 |
-| 安全 | `PipeSecurity` 仅允许 `SYSTEM` + 当前交互用户；禁用匿名访问 |
+| 安全 | `PipeSecurity` 为保护型 DACL，允许 `SYSTEM` + `INTERACTIVE` + 当前用户；禁用匿名访问 |
 
 ### 1.1 Spike 结论（2026-11-12，风险 R1 已关闭）
 
@@ -36,6 +36,8 @@
 | 待验证 | 服务（session 0）↔ 用户（session 1）跨会话，留待 S3 服务封装后实测 |
 
 结论：采用方案 A（自定义 SDDL + `create_with_security_attributes_raw`），无需回退到默认 ACL。
+
+**跨会话修订（2026-11-12）**：服务进程运行在 session 0 且以 SYSTEM 身份注册管道，`for_current_user()` 取到的 SID 就是 SYSTEM，仅 `SY + 当前用户` 会让用户会话无法连接。SDDL 调整为 `D:P(A;;GA;;;SY)(A;;GA;;;IU)(A;;GA;;;<sid>)`。`IU`（INTERACTIVE）覆盖交互登录用户，后台服务不在该组内，范围仍窄于 `Authenticated Users`。多用户机器如需收紧到单一用户，应在安装时把目标 SID 写入服务配置并在启动时读取。
 
 **替换触发条件（写入验收标准）**：
 M1 完成后做本机微基准，若满足以下任一条件，则启动共享内存环替换（限指标通道，控制面仍走管道）：
@@ -74,13 +76,20 @@ sidecar: 拉取订阅 → schema/规则校验 → 写 snapshots/<seq>.json + 更
 
 | 项 | 约定 |
 |---|---|
-| 路径 | `%ProgramData%\McloudClient\logs\core.YYYY-MM-DD.log` |
-| 滚动 | 按大小 10 MB，保留 5 个文件（上限 50 MB） |
-| 写入方式 | `tracing-appender` 非阻塞 + `WorkerGuard`；panic hook 中显式 flush |
+| 路径 | `%ProgramData%\McloudClient\logs\core.log`（`--log-dir` 可覆盖；命名见下方修订） |
+| 滚动 | 按大小 10 MB，保留 5 个文件（`core.log`、`core.1.log` … `core.4.log`，上限 50 MB） |
+| 写入方式 | `tracing-appender` 非阻塞 + `WorkerGuard`；默认 `info`，`RUST_LOG` 可覆盖；控制台与文件双写 |
 | 级别 | 默认 `info`；`debug` 需显式开启且自动在 30 min 后回落 |
 | 采集 | sidecar 只读文件，做展示/导出；不上传 |
 
 补充：仅「崩溃前状态快照」等关键事件通过 IPC 推送，避免内核崩溃时丢失最后的上下文。日志正文不走 IPC，避免背压阻塞数据面。
+
+### 3.1 实现修订（2026-11-12）
+
+- **命名**：原文为 `core.YYYY-MM-DD.log`，实现改为 `core.log` + 序号轮转。理由：按大小滚动时序号更直观，且日期命名无法约束单日体积上限（一天内仍可能写满磁盘）。「10 MB × 5」的体积约束不变。
+- **轮转**：`RollingWriter` 在写入前检查剩余空间，超限即关闭当前文件、后移历史文件并删除最旧一份。
+- **panic flush**：`WorkerGuard` 在进程正常退出或 unwind 时 drop 并 flush；未单独注册 panic hook。
+- **默认级别**：`info`。服务模式下 stdout 不可见，若沿用 `EnvFilter` 的 ERROR 默认值，启动与停止事件会全部丢失。
 
 ## 4. 可替换性设计（IPC trait）
 
