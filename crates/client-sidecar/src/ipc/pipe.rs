@@ -14,11 +14,11 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, WriteHalf};
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
 };
-use tokio::sync::{Mutex, broadcast, oneshot, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 use crate::error::IpcError;
 use crate::ipc::acl::PipeSecurity;
-use crate::ipc::{EventStream, Handler, IpcTransport};
+use crate::ipc::{EventSink, EventStream, Handler, IpcTransport};
 use crate::protocol::{self, ErrorBody, Message, VERSION};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -173,69 +173,104 @@ async fn run_connection<R, W, H>(
 ) -> Result<(), IpcError>
 where
     R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
     H: Handler,
 {
-    loop {
+    // 响应与事件共用同一条 writer，由独立任务串行写出：
+    // 避免在 `select!` 里取消到一半的 `write_frame`，造成帧错位。
+    let (tx, mut rx) = mpsc::channel::<Message>(EVENT_BUFFER);
+    let events = EventSink::new(tx.clone());
+    let writer_task = tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            if protocol::write_frame(&mut writer, &message).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = loop {
         let message = match protocol::read_frame(&mut reader).await {
             Ok(message) => message,
             Err(protocol::ProtocolError::Io(error))
                 if error.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
-                return Ok(());
+                break Ok(());
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => break Err(error.into()),
         };
 
-        if let Message::Request {
+        let Message::Request {
             v,
             id,
             method,
             params,
         } = message
-        {
-            let response = if v != VERSION {
-                Message::Response {
-                    v: VERSION,
-                    id,
-                    ok: false,
-                    result: None,
-                    error: Some(ErrorBody {
-                        code: "version_mismatch".to_owned(),
-                        message: format!("expected {VERSION}, got {v}"),
-                    }),
-                }
-            } else {
-                match handler.handle(&method, params).await {
-                    Ok(value) => Message::Response {
-                        v: VERSION,
-                        id,
-                        ok: true,
-                        result: Some(value),
-                        error: None,
-                    },
-                    Err(error) => {
-                        // 保留处理器给出的错误码（如 fetch_failed / validate_failed），
-                        // 其余错误统一归为 handler_error。
-                        let body = match error {
-                            IpcError::Remote { code, message } => ErrorBody { code, message },
-                            other => ErrorBody {
-                                code: "handler_error".to_owned(),
-                                message: other.to_string(),
-                            },
-                        };
-                        Message::Response {
-                            v: VERSION,
-                            id,
-                            ok: false,
-                            result: None,
-                            error: Some(body),
-                        }
-                    }
-                }
-            };
-            protocol::write_frame(&mut writer, &response).await?;
+        else {
+            continue;
+        };
+
+        let response = build_response(v, id, &method, params, handler.as_ref(), &events).await;
+        if tx.send(response).await.is_err() {
+            break Err(IpcError::Closed);
         }
+    };
+
+    drop(tx);
+    drop(events);
+    let _ = writer_task.await;
+    result
+}
+
+async fn build_response<H>(
+    v: u16,
+    id: u64,
+    method: &str,
+    params: Value,
+    handler: &H,
+    events: &EventSink,
+) -> Message
+where
+    H: Handler,
+{
+    if v != VERSION {
+        return Message::Response {
+            v: VERSION,
+            id,
+            ok: false,
+            result: None,
+            error: Some(ErrorBody {
+                code: "version_mismatch".to_owned(),
+                message: format!("expected {VERSION}, got {v}"),
+            }),
+        };
+    }
+
+    match handler.handle_with(method, params, events).await {
+        Ok(value) => Message::Response {
+            v: VERSION,
+            id,
+            ok: true,
+            result: Some(value),
+            error: None,
+        },
+        Err(error) => Message::Response {
+            v: VERSION,
+            id,
+            ok: false,
+            result: None,
+            error: Some(error_body(error)),
+        },
+    }
+}
+
+/// 保留处理器给出的错误码（如 `fetch_failed` / `validate_failed`），其余归为 `handler_error`。
+fn error_body(error: IpcError) -> ErrorBody {
+    match error {
+        IpcError::Remote { code, message } => ErrorBody { code, message },
+        other => ErrorBody {
+            code: "handler_error".to_owned(),
+            message: other.to_string(),
+        },
     }
 }
 
@@ -295,6 +330,134 @@ mod tests {
         assert_eq!(result["params"]["detail"], true);
         client.close().await;
         server.await.expect("join").expect("server");
+    }
+
+    struct Emitter;
+
+    #[async_trait]
+    impl Handler for Emitter {
+        async fn handle(&self, _method: &str, _params: Value) -> Result<Value, IpcError> {
+            Ok(Value::Null)
+        }
+
+        async fn handle_with(
+            &self,
+            _method: &str,
+            _params: Value,
+            events: &EventSink,
+        ) -> Result<Value, IpcError> {
+            assert!(events.send(
+                "reload",
+                serde_json::json!({"state": "applied", "version": 1})
+            ));
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_can_push_event_before_response() {
+        let name = pipe_name("evt");
+        let server = tokio::spawn({
+            let name = name.clone();
+            async move { accept_once(&name, Arc::new(Emitter)).await }
+        });
+
+        let client = connect_with_retry(&name).await;
+        // 必须在请求前订阅，否则广播会错过事件。
+        let mut events = client.events();
+        let result = client
+            .request("reload", Value::Null)
+            .await
+            .expect("request");
+        assert_eq!(result["ok"], true);
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event");
+        match event {
+            Message::Event { kind, payload, .. } => {
+                assert_eq!(kind, "reload");
+                assert_eq!(payload["state"], "applied");
+                assert_eq!(payload["version"], 1);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        client.close().await;
+        server.await.expect("join").expect("server");
+    }
+
+    struct Rejecting;
+
+    #[async_trait]
+    impl Handler for Rejecting {
+        async fn handle(&self, _method: &str, _params: Value) -> Result<Value, IpcError> {
+            Err(IpcError::Unsupported)
+        }
+
+        async fn handle_with(
+            &self,
+            _method: &str,
+            _params: Value,
+            events: &EventSink,
+        ) -> Result<Value, IpcError> {
+            assert!(events.send(
+                "reload",
+                serde_json::json!({"state": "rejected", "code": "validate_failed"})
+            ));
+            Err(IpcError::Remote {
+                code: "validate_failed".to_owned(),
+                message: "rules is empty".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_event_and_error_response_coexist() {
+        let name = pipe_name("rej");
+        let server = tokio::spawn({
+            let name = name.clone();
+            async move { accept_once(&name, Arc::new(Rejecting)).await }
+        });
+
+        let client = connect_with_retry(&name).await;
+        let mut events = client.events();
+        let error = client
+            .request("reload", Value::Null)
+            .await
+            .expect_err("should fail");
+        match error {
+            IpcError::Remote { code, .. } => assert_eq!(code, "validate_failed"),
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event");
+        match event {
+            Message::Event { payload, .. } => {
+                assert_eq!(payload["state"], "rejected");
+                assert_eq!(payload["code"], "validate_failed");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        client.close().await;
+        server.await.expect("join").expect("server");
+    }
+
+    #[tokio::test]
+    async fn event_sink_drops_and_counts_when_queue_is_full() {
+        let (tx, mut rx) = mpsc::channel::<Message>(1);
+        let sink = EventSink::new(tx);
+        assert!(sink.send("first", Value::Null));
+        assert!(!sink.send("second", Value::Null));
+        assert_eq!(sink.dropped(), 1);
+
+        let first = rx.recv().await.expect("first");
+        assert!(matches!(first, Message::Event { .. }));
     }
 
     #[tokio::test]

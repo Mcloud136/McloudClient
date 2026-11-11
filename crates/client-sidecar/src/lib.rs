@@ -9,5 +9,5 @@ pub mod protocol;
 pub mod snapshot;
 
 pub use error::IpcError;
-pub use ipc::{Handler, IpcTransport};
+pub use ipc::{EventSink, Handler, IpcTransport};
 pub use protocol::{ErrorBody, MAX_FRAME, Message, VERSION};
