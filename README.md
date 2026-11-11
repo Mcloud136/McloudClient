@@ -47,7 +47,7 @@ cargo run -p client-core -- --profile <profile.json> --reload-interval 2
 |---|---|
 | `crates/client-core/` | 数据面：SOCKS5、VLESS 出站、规则引擎、DNS、rule-set、健康检查、热重载 |
 | `scripts/` | `clash2profile.py`、GEO 数据更新、DNS/UDP 端到端测试、C0a 采集脚本 |
-| `docs/` | 客户端设计规划、G1 门控、移交文档、C0a 客户端分布数据 |
+| `docs/` | 客户端设计规划、G1 门控、C0a 分布数据、C0d 实测报告、ADR |
 
 ## 注意
 
