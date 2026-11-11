@@ -24,8 +24,20 @@
 | 事件推送 | 单向，无 `id`；有界队列，满时丢弃最旧并计数 |
 | 安全 | `PipeSecurity` 仅允许 `SYSTEM` + 当前交互用户；禁用匿名访问 |
 
-**替换触发条件（写入验收标准）**：
+### 1.1 Spike 结论（2026-11-12，风险 R1 已关闭）
 
+| 项 | 结果 |
+|---|---|
+| API | tokio 1.54.1 `ServerOptions::create_with_security_attributes_raw(addr, *mut c_void)` |
+| SDDL | `D:P(A;;GA;;;SY)(A;;GA;;;<current_user_sid>)` |
+| 实测生效 DACL | `D:P(A;;FA;;;SY)(A;;FA;;;LA)` |
+| 客户端往返 | 同用户连接并收发成功 |
+| 已知限制 | 本地管理员账户的 SID 被规范化为 `LA`（本地管理员组），无法精确到单个管理员用户；标准用户保留原 SID |
+| 待验证 | 服务（session 0）↔ 用户（session 1）跨会话，留待 S3 服务封装后实测 |
+
+结论：采用方案 A（自定义 SDDL + `create_with_security_attributes_raw`），无需回退到默认 ACL。
+
+**替换触发条件（写入验收标准）**：
 M1 完成后做本机微基准，若满足以下任一条件，则启动共享内存环替换（限指标通道，控制面仍走管道）：
 
 - 控制命令 RTT 的 P99 > 5 ms（不含首次建连）；

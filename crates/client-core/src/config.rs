@@ -73,6 +73,10 @@ pub struct Config {
     /// 配置热重载间隔（秒）；0 表示禁用。
     #[arg(long, default_value_t = 0)]
     pub reload_interval: u64,
+
+    /// IPC 命名管道名（如 `\\.\pipe\mcloud-client`）；缺省不启用控制面接口。
+    #[arg(long)]
+    pub ipc_pipe: Option<String>,
 }
 
 impl Config {
@@ -167,6 +171,7 @@ mod tests {
             dns_upstream: "223.5.5.5:53".to_owned(),
             profile_url: None,
             reload_interval: 0,
+            ipc_pipe: None,
         }
     }
 
