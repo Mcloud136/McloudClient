@@ -1,6 +1,8 @@
 # McloudClient
 
-用户侧客户端（Rust），与节点服务端 [`v2node-rust`](../v2node-rust) 分离维护。
+[![CI](https://github.com/Mcloud136/McloudClient/actions/workflows/ci.yml/badge.svg)](https://github.com/Mcloud136/McloudClient/actions/workflows/ci.yml)
+
+用户侧客户端（Rust），与节点服务端 [`v2node-rust`](https://github.com/Mcloud136/v2node-rust) 分离维护。
 
 当前阶段：`crates/client-core` 数据面 PoC —— SOCKS5 入站 → 规则分流 → VLESS/WS/TLS/mlkem 出站。
 
@@ -8,14 +10,14 @@
 
 只复用 `v2node-proto`（VLESS 帧与 mlkem 握手的共享实现），不依赖服务端任何私有模块。
 
-当前为**过渡方案**：`crates/client-core/Cargo.toml` 以相对路径依赖
-`../../../v2node-rust/crates/v2node-proto`。服务端仓库重建完成后，应改为 tag 依赖：
+以 **git tag** 固定版本引用：
 
 ```toml
 v2node-proto = { git = "https://github.com/Mcloud136/v2node-rust", tag = "v0.2.0" }
 ```
 
-切换前，本仓库无法脱离同级 `v2node-rust` 目录独立构建。
+服务端发布新 tag 后，提升 `tag` 并执行 `cargo update -p v2node-proto` 即可。
+本仓库可脱离同级目录独立构建（CI 在 ubuntu 与 windows 上各跑一遍验证）。
 
 ## 构建与验证
 
