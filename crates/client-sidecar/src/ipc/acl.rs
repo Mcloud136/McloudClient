@@ -27,15 +27,19 @@ pub struct PipeSecurity {
 }
 
 impl PipeSecurity {
-    /// 构造仅允许 `SYSTEM` 与当前用户的保护型 DACL。
+    /// 构造允许 `SYSTEM`、交互登录用户与当前用户的保护型 DACL。
     ///
-    /// SDDL：`D:P(A;;GA;;;SY)(A;;GA;;;<current_user_sid>)`
+    /// SDDL：`D:P(A;;GA;;;SY)(A;;GA;;;IU)(A;;GA;;;<current_user_sid>)`
+    ///
+    /// `IU`（INTERACTIVE）是跨会话的前提：服务运行在 session 0（SYSTEM），
+    /// 其令牌 SID 不包含交互用户，仅用 `SY + 当前用户` 会导致用户会话无法连接。
+    /// 后台服务与非交互进程不属于 `IU` 组，因此范围仍窄于 `Authenticated Users`。
     ///
     /// 注意：本地管理员账户的 SID 会被 Windows 规范化为组别名 `LA`，
     /// 即整个本地管理员组；标准用户则保留原 SID。
     pub fn for_current_user() -> Result<Self, IpcError> {
         let sid = current_user_sid()?;
-        let sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})");
+        let sddl = sddl_for(&sid);
         let wide: Vec<u16> = OsStr::new(&sddl).encode_wide().chain(once(0)).collect();
 
         let mut descriptor: *mut c_void = null_mut();
@@ -80,6 +84,11 @@ impl Drop for PipeSecurity {
     }
 }
 
+/// 保护型 DACL：`SYSTEM` + 交互登录用户 + 指定 SID。
+fn sddl_for(sid: &str) -> String {
+    format!("D:P(A;;GA;;;SY)(A;;GA;;;IU)(A;;GA;;;{sid})")
+}
+
 fn current_user_sid() -> Result<String, IpcError> {
     unsafe {
         let mut token: HANDLE = null_mut();
@@ -120,5 +129,19 @@ fn current_user_sid() -> Result<String, IpcError> {
 
         CloseHandle(token);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sddl_for;
+
+    #[test]
+    fn sddl_allows_system_interactive_and_current_user() {
+        let sddl = sddl_for("S-1-5-21-1-2-3-1001");
+        assert!(sddl.starts_with("D:P"), "必须是保护型 DACL: {sddl}");
+        assert!(sddl.contains("(A;;GA;;;SY)"), "缺少 SYSTEM: {sddl}");
+        assert!(sddl.contains("(A;;GA;;;IU)"), "缺少 INTERACTIVE: {sddl}");
+        assert!(sddl.contains("S-1-5-21-1-2-3-1001"), "缺少当前用户: {sddl}");
     }
 }
