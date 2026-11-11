@@ -2,38 +2,36 @@
 //!
 //! 职责：
 //! 1. 维护快照（引导快照 + 原子写 + 保留 5 版）；
-//! 2. 启动内核并连接其 IPC 管道；
+//! 2. 连接**由外部托管**的内核 IPC，不持有内核进程的生命周期；
 //! 3. 源文件变化时导入新快照并触发 reload，失败按三态分类报告；
-//! 4. 退出时终止内核。
+//! 4. IPC 断开后按指数退避重连，并补发未完成的 reload。
 //!
-//! S3 范围：本地文件源；订阅 URL、完整 supervisor 退避与 Windows 服务封装留待后续。
+//! 进程所有权（ADR 0001 §5）：内核由服务宿主或运维独立启动，
+//! `kill sidecar` 不会终止内核；sidecar 重启后重新连接即可恢复控制。
 
 #[cfg(windows)]
 mod imp {
     use std::path::PathBuf;
-    use std::process::Stdio;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use clap::Parser;
     use client_sidecar::ipc::pipe::PipeClient;
+    use client_sidecar::protocol::Message;
     use client_sidecar::snapshot::SnapshotStore;
-    use client_sidecar::{IpcTransport, VERSION};
+    use client_sidecar::{IpcError, IpcTransport, VERSION};
     use serde_json::{Value, json};
-    use tokio::process::Command;
 
     /// 引导快照：仅放行全部流量直连，保证首次启动不空配置。
     const BOOTSTRAP: &str = r#"{"proxies":[],"proxy-groups":[],"rules":["MATCH,DIRECT"]}"#;
+    const INITIAL_BACKOFF_MS: u64 = 100;
+    const MAX_BACKOFF_MS: u64 = 5_000;
 
     #[derive(Debug, Parser)]
     #[command(name = "client-sidecar", version, about = "McloudClient 控制面")]
     struct Args {
-        /// 与内核通信的命名管道名。
+        /// 内核的命名管道名。
         #[arg(long)]
         pipe: String,
-
-        /// 内核可执行文件路径。
-        #[arg(long)]
-        kernel: PathBuf,
 
         /// 配置源文件（JSON profile）。
         #[arg(long)]
@@ -43,13 +41,108 @@ mod imp {
         #[arg(long)]
         snapshot_dir: PathBuf,
 
-        /// 传给内核的 SOCKS5 监听地址。
-        #[arg(long, default_value = "127.0.0.1:1080")]
-        listen: String,
-
         /// 源文件轮询间隔（秒）。
         #[arg(long, default_value_t = 2)]
         refresh_secs: u64,
+
+        /// 首次连接内核 IPC 的等待上限（秒）；超时退出，避免静默空转。
+        #[arg(long, default_value_t = 30)]
+        connect_timeout_secs: u64,
+    }
+
+    /// 内核连接状态：断开后按指数退避重连，不因单次失败退出。
+    struct Link {
+        pipe: String,
+        client: Option<PipeClient>,
+        backoff_ms: u64,
+        next_attempt: Instant,
+        connects: u64,
+        failures: u64,
+    }
+
+    impl Link {
+        fn new(pipe: String) -> Self {
+            Self {
+                pipe,
+                client: None,
+                backoff_ms: INITIAL_BACKOFF_MS,
+                next_attempt: Instant::now(),
+                connects: 0,
+                failures: 0,
+            }
+        }
+
+        /// 返回可用连接；未到重试时刻或重连失败时返回 `None`。
+        async fn ensure(&mut self) -> Option<&PipeClient> {
+            if self.client.is_none() {
+                if Instant::now() < self.next_attempt {
+                    return None;
+                }
+                match PipeClient::connect(&self.pipe).await {
+                    Ok(client) => {
+                        self.connects += 1;
+                        self.backoff_ms = INITIAL_BACKOFF_MS;
+                        println!(
+                            "kernel ipc connected: connects={} failures={}",
+                            self.connects, self.failures
+                        );
+                        spawn_event_printer(&client);
+                        self.client = Some(client);
+                    }
+                    Err(error) => {
+                        self.failures += 1;
+                        println!(
+                            "kernel ipc unavailable: {error}; retry in {} ms",
+                            self.backoff_ms
+                        );
+                        self.next_attempt = Instant::now() + Duration::from_millis(self.backoff_ms);
+                        self.backoff_ms = (self.backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        return None;
+                    }
+                }
+            }
+            self.client.as_ref()
+        }
+
+        /// 连接类错误才丢弃连接；内核拒绝（`Remote`）保持连接。
+        fn mark(&mut self, error: &IpcError) {
+            if !is_connection_error(error) {
+                return;
+            }
+            println!("kernel ipc lost: {error}; reconnecting");
+            self.client = None;
+            self.next_attempt = Instant::now() + Duration::from_millis(self.backoff_ms);
+        }
+    }
+
+    fn is_connection_error(error: &IpcError) -> bool {
+        matches!(
+            error,
+            IpcError::Io(_)
+                | IpcError::Closed
+                | IpcError::Timeout
+                | IpcError::Protocol(_)
+                | IpcError::Unexpected
+        )
+    }
+
+    /// 把内核推送的事件打印出来；连接关闭后任务自行退出。
+    fn spawn_event_printer(client: &PipeClient) {
+        let mut events = client.events();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(Message::Event { kind, payload, .. }) => {
+                        println!("event {kind}: {payload}");
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                        println!("events dropped: {dropped}");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     #[tokio::main]
@@ -59,41 +152,21 @@ mod imp {
         store.ensure_dir()?;
         store.bootstrap(BOOTSTRAP.as_bytes())?;
 
-        let mut source_hash = 0u64;
-        match std::fs::read(&args.source) {
-            Ok(bytes) => match validate(&bytes) {
-                Ok(()) => {
-                    let seq = store.write(&bytes)?;
-                    source_hash = hash(&bytes);
-                    println!("imported source as snapshot seq={seq}");
-                }
-                Err(error) => eprintln!("validate_failed: {error}"),
-            },
-            Err(error) => eprintln!("fetch_failed: {error}"),
+        let mut source_hash = 0;
+        let mut pending = import_source(&args, &store, &mut source_hash);
+        if pending {
+            println!("source imported; reload pending");
         }
 
-        let (seq, _) = store.current()?.ok_or("no current snapshot")?;
-        let live = store.live_path();
-        println!(
-            "starting kernel with snapshot seq={seq}: {}",
-            live.display()
-        );
+        let mut link = Link::new(args.pipe.clone());
+        wait_initial(&mut link, args.connect_timeout_secs).await?;
+        if let Some(client) = link.client.as_ref() {
+            let status = client.request("status", json!({ "detail": true })).await?;
+            println!("kernel status: {status}");
+        }
 
-        let mut child = Command::new(&args.kernel)
-            .arg("--profile")
-            .arg(&live)
-            .arg("--listen")
-            .arg(&args.listen)
-            .arg("--ipc-pipe")
-            .arg(&args.pipe)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()?;
-
-        let client = connect_with_retry(&args.pipe).await?;
-        let status = client.request("status", json!({"detail": true})).await?;
-        println!("kernel status: {status}");
+        let mut ticks = tokio::time::interval(Duration::from_secs(args.refresh_secs));
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -102,51 +175,93 @@ mod imp {
                     println!("ctrl-c received, shutting down");
                     break;
                 }
-                () = tokio::time::sleep(Duration::from_secs(args.refresh_secs)) => {
-                    if let Some(status) = child.try_wait()? {
-                        eprintln!("kernel exited unexpectedly: {status}");
-                        break;
+                _ = ticks.tick() => {
+                    if import_source(&args, &store, &mut source_hash) {
+                        pending = true;
                     }
-                    refresh(&args, &store, &client, &mut source_hash).await;
+                    if let Some(outcome) = reload_if_pending(&mut link, pending).await {
+                        match outcome {
+                            Ok(value) => {
+                                pending = false;
+                                println!("reload applied {value}");
+                            }
+                            Err(error) => {
+                                link.mark(&error);
+                                if is_connection_error(&error) {
+                                    println!("reload deferred until reconnect: {error}");
+                                } else {
+                                    // 内核拒绝：重试同一份配置没有意义，等源变化再试。
+                                    pending = false;
+                                    println!("kernel_rejected: {error}");
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        client.close().await;
-        let _ = child.kill().await;
+        if let Some(client) = link.client.take() {
+            client.close().await;
+        }
         Ok(())
     }
 
-    async fn refresh(
-        args: &Args,
-        store: &SnapshotStore,
-        client: &PipeClient,
-        source_hash: &mut u64,
-    ) {
+    /// 首次连接：在超时内反复尝试，成功后退避状态由 `Link` 接管。
+    async fn wait_initial(
+        link: &mut Link,
+        timeout_secs: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        while link.ensure().await.is_none() {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "kernel ipc not available within {timeout_secs} s: {}",
+                    link.pipe
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(())
+    }
+
+    /// 仅在有待应用配置时才发 `reload`，避免空转请求。
+    async fn reload_if_pending(link: &mut Link, pending: bool) -> Option<Result<Value, IpcError>> {
+        if !pending {
+            return None;
+        }
+        let client = link.ensure().await?;
+        Some(client.request("reload", json!({})).await)
+    }
+
+    /// 读取源文件并在变化时写入新快照；返回是否需要 reload。
+    fn import_source(args: &Args, store: &SnapshotStore, source_hash: &mut u64) -> bool {
         let bytes = match std::fs::read(&args.source) {
             Ok(bytes) => bytes,
             Err(error) => {
-                eprintln!("fetch_failed: {error}");
-                return;
+                println!("fetch_failed: {error}");
+                return false;
             }
         };
         let new_hash = hash(&bytes);
         if new_hash == *source_hash {
-            return;
+            return false;
         }
         if let Err(error) = validate(&bytes) {
-            eprintln!("validate_failed: {error}");
-            return;
+            println!("validate_failed: {error}");
+            return false;
         }
         match store.write(&bytes) {
-            Ok(seq) => match client.request("reload", json!({})).await {
-                Ok(value) => {
-                    println!("reload applied seq={seq} {value}");
-                    *source_hash = new_hash;
-                }
-                Err(error) => eprintln!("kernel_rejected: {error}"),
-            },
-            Err(error) => eprintln!("snapshot_write_failed: {error}"),
+            Ok(seq) => {
+                *source_hash = new_hash;
+                println!("imported source as snapshot seq={seq}");
+                true
+            }
+            Err(error) => {
+                println!("snapshot_write_failed: {error}");
+                false
+            }
         }
     }
 
@@ -169,30 +284,21 @@ mod imp {
     fn hash(bytes: &[u8]) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
+
         let mut hasher = DefaultHasher::new();
         bytes.hash(&mut hasher);
         hasher.finish()
     }
 
-    async fn connect_with_retry(name: &str) -> Result<PipeClient, Box<dyn std::error::Error>> {
-        println!("ipc protocol v{VERSION}");
-        for attempt in 0..120 {
-            match PipeClient::connect(name).await {
-                Ok(client) => return Ok(client),
-                Err(error) => {
-                    if attempt % 20 == 0 {
-                        eprintln!("waiting for kernel ipc: {error}");
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-        Err(format!("kernel ipc not available: {name}").into())
+    /// 协议版本在启动时打印一次，便于排查版本不匹配。
+    pub fn protocol_version() -> u16 {
+        VERSION
     }
 }
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("ipc protocol v{}", imp::protocol_version());
     imp::run()
 }
 
