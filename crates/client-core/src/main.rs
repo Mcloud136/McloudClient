@@ -9,20 +9,6 @@
 //!
 //! 明确不做：TUN、完整 rule 生态、非 VLESS 协议。
 
-mod config;
-mod context;
-mod dns;
-mod geo;
-mod health;
-mod outbound;
-mod profile;
-mod relay;
-mod reload;
-mod router;
-mod rules;
-mod socks5;
-mod udp;
-
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
@@ -30,12 +16,13 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-use crate::{
+use client_core::{
     config::Config,
     context::AppContext,
-    dns::{DnsServer, FakeIp},
+    dns::{self, DnsServer, FakeIp},
     geo::GeoData,
-    reload::{ReloadSpec, Source},
+    reload::{self, ReloadSpec, Source},
+    socks5,
 };
 
 #[tokio::main]

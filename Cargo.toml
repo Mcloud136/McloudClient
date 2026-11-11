@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/client-core"]
+# edition 2024 成员需要 v3 resolver；显式声明避免 cargo 回退到 v1 的警告。
+resolver = "3"
 
 # 与 v2node-rust 保持同一套硬门禁；客户端代码不得引入 unsafe。
 [workspace.lints.rust]
