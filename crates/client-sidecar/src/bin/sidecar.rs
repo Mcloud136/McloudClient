@@ -3,11 +3,13 @@
 //! 职责：
 //! 1. 维护快照（引导快照 + 原子写 + 保留 5 版）；
 //! 2. 连接**由外部托管**的内核 IPC，不持有内核进程的生命周期；
-//! 3. 源文件变化时导入新快照并触发 reload，失败按三态分类报告；
+//! 3. 配置源（本地文件或订阅 URL）变化时导入新快照并触发 reload；
 //! 4. IPC 断开后按指数退避重连，并补发未完成的 reload。
 //!
 //! 进程所有权（ADR 0001 §5）：内核由服务宿主或运维独立启动，
 //! `kill sidecar` 不会终止内核；sidecar 重启后重新连接即可恢复控制。
+//!
+//! 安全：订阅 URL 含 `token`，日志只记录源类型（`file` / `url`），不记录 URL 本身。
 
 #[cfg(windows)]
 mod imp {
@@ -16,6 +18,7 @@ mod imp {
 
     use clap::Parser;
     use client_sidecar::ipc::pipe::PipeClient;
+    use client_sidecar::logging;
     use client_sidecar::protocol::Message;
     use client_sidecar::snapshot::SnapshotStore;
     use client_sidecar::{IpcError, IpcTransport, VERSION};
@@ -34,20 +37,52 @@ mod imp {
         pipe: String,
 
         /// 配置源文件（JSON profile）。
-        #[arg(long)]
-        source: PathBuf,
+        #[arg(long, conflicts_with = "source_url")]
+        source: Option<PathBuf>,
+
+        /// 配置源 URL（返回 JSON profile）；日志不会记录该地址。
+        #[arg(long, conflicts_with = "source")]
+        source_url: Option<String>,
 
         /// 快照目录。
         #[arg(long)]
         snapshot_dir: PathBuf,
 
-        /// 源文件轮询间隔（秒）。
+        /// 源轮询间隔（秒）。
         #[arg(long, default_value_t = 2)]
         refresh_secs: u64,
 
         /// 首次连接内核 IPC 的等待上限（秒）；超时退出，避免静默空转。
         #[arg(long, default_value_t = 30)]
         connect_timeout_secs: u64,
+
+        /// 日志目录；缺省为 `%ProgramData%\McloudClient\logs`。
+        #[arg(long)]
+        log_dir: Option<PathBuf>,
+    }
+
+    /// 配置来源；URL 不参与 `Debug`，避免 token 进入日志。
+    #[derive(Clone)]
+    enum Origin {
+        File(PathBuf),
+        Url(String),
+    }
+
+    impl Origin {
+        fn from_args(args: &Args) -> Result<Self, Box<dyn std::error::Error>> {
+            match (&args.source, &args.source_url) {
+                (Some(path), None) => Ok(Self::File(path.clone())),
+                (None, Some(url)) => Ok(Self::Url(url.clone())),
+                _ => Err("exactly one of --source or --source-url is required".into()),
+            }
+        }
+
+        fn label(&self) -> &'static str {
+            match self {
+                Self::File(_) => "file",
+                Self::Url(_) => "url",
+            }
+        }
     }
 
     /// 内核连接状态：断开后按指数退避重连，不因单次失败退出。
@@ -82,17 +117,20 @@ mod imp {
                     Ok(client) => {
                         self.connects += 1;
                         self.backoff_ms = INITIAL_BACKOFF_MS;
-                        println!(
-                            "kernel ipc connected: connects={} failures={}",
-                            self.connects, self.failures
+                        tracing::info!(
+                            connects = self.connects,
+                            failures = self.failures,
+                            "kernel ipc connected"
                         );
                         spawn_event_printer(&client);
                         self.client = Some(client);
                     }
                     Err(error) => {
                         self.failures += 1;
-                        println!(
-                            "kernel ipc unavailable: {error}; retry in {} ms",
+                        tracing::warn!(
+                            %error,
+                            retry_ms = self.backoff_ms,
+                            "kernel ipc unavailable; retry in {} ms",
                             self.backoff_ms
                         );
                         self.next_attempt = Instant::now() + Duration::from_millis(self.backoff_ms);
@@ -109,7 +147,7 @@ mod imp {
             if !is_connection_error(error) {
                 return;
             }
-            println!("kernel ipc lost: {error}; reconnecting");
+            tracing::warn!(%error, "kernel ipc lost; reconnecting");
             self.client = None;
             self.next_attempt = Instant::now() + Duration::from_millis(self.backoff_ms);
         }
@@ -133,18 +171,20 @@ mod imp {
             .map_or(0, |value| value.as_micros() as u64)
     }
 
-    /// 把内核推送的事件打印出来；连接关闭后任务自行退出。
+    /// 把内核推送的事件记录到日志；连接关闭后任务自行退出。
     fn spawn_event_printer(client: &PipeClient) {
         let mut events = client.events();
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(Message::Event { kind, payload, .. }) => {
-                        println!("event {kind} received_us={} payload={payload}", now_us());
+                        // 保留 "event <kind> received_us=… payload=…" 的连续格式，
+                        // 便于抓包与既有测试脚本按行解析。
+                        tracing::info!(received_us = now_us(), %payload, "event {kind}");
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                        println!("events dropped: {dropped}");
+                        tracing::warn!(dropped, "events dropped");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -155,21 +195,25 @@ mod imp {
     #[tokio::main]
     pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args = Args::parse();
+        let _log_guard = logging::init_with(args.log_dir.clone(), "sidecar")?;
+        tracing::info!(protocol = VERSION, "sidecar starting");
+
+        let origin = Origin::from_args(&args)?;
         let store = SnapshotStore::new(&args.snapshot_dir, 5);
         store.ensure_dir()?;
         store.bootstrap(BOOTSTRAP.as_bytes())?;
 
         let mut source_hash = 0;
-        let mut pending = import_source(&args, &store, &mut source_hash);
+        let mut pending = import_source(&origin, &store, &mut source_hash).await;
         if pending {
-            println!("source imported; reload pending");
+            tracing::info!(source = origin.label(), "source imported; reload pending");
         }
 
         let mut link = Link::new(args.pipe.clone());
         wait_initial(&mut link, args.connect_timeout_secs).await?;
         if let Some(client) = link.client.as_ref() {
             let status = client.request("status", json!({ "detail": true })).await?;
-            println!("kernel status: {status}");
+            tracing::info!(%status, "kernel status");
         }
 
         let mut ticks = tokio::time::interval(Duration::from_secs(args.refresh_secs));
@@ -179,27 +223,27 @@ mod imp {
             tokio::select! {
                 result = tokio::signal::ctrl_c() => {
                     result?;
-                    println!("ctrl-c received, shutting down");
+                    tracing::info!("ctrl-c received, shutting down");
                     break;
                 }
                 _ = ticks.tick() => {
-                    if import_source(&args, &store, &mut source_hash) {
+                    if import_source(&origin, &store, &mut source_hash).await {
                         pending = true;
                     }
                     match tick(&mut link, pending).await {
                         TickOutcome::Idle => {}
                         TickOutcome::Applied(value) => {
                             pending = false;
-                            println!("reload applied {value}");
+                            tracing::info!(%value, "reload applied");
                         }
                         TickOutcome::ConnectionLost(error) => {
                             link.mark(&error);
-                            println!("ipc lost, reload pending={pending}: {error}");
+                            tracing::warn!(%error, pending, "ipc lost, reload pending");
                         }
                         TickOutcome::Rejected(error) => {
                             // 内核拒绝：重试同一份配置没有意义，等源变化再试。
                             pending = false;
-                            println!("kernel_rejected: {error}");
+                            tracing::warn!(%error, "kernel_rejected");
                         }
                     }
                 }
@@ -264,12 +308,24 @@ mod imp {
         }
     }
 
-    /// 读取源文件并在变化时写入新快照；返回是否需要 reload。
-    fn import_source(args: &Args, store: &SnapshotStore, source_hash: &mut u64) -> bool {
-        let bytes = match std::fs::read(&args.source) {
+    /// 拉取一次源内容；错误信息中不含 URL（含 token）与正文。
+    async fn read_source(origin: &Origin) -> Result<Vec<u8>, String> {
+        match origin {
+            Origin::File(path) => {
+                std::fs::read(path).map_err(|error| format!("fetch_failed: {error}"))
+            }
+            Origin::Url(url) => client_sidecar::fetch::fetch_url(url)
+                .await
+                .map_err(|error| format!("fetch_failed: {error}")),
+        }
+    }
+
+    /// 拉取源并在变化时写入新快照；返回是否需要 reload。
+    async fn import_source(origin: &Origin, store: &SnapshotStore, source_hash: &mut u64) -> bool {
+        let bytes = match read_source(origin).await {
             Ok(bytes) => bytes,
             Err(error) => {
-                println!("fetch_failed: {error}");
+                tracing::warn!(%error, source = origin.label(), "source unavailable");
                 return false;
             }
         };
@@ -278,17 +334,17 @@ mod imp {
             return false;
         }
         if let Err(error) = validate(&bytes) {
-            println!("validate_failed: {error}");
+            tracing::warn!(%error, "validate_failed");
             return false;
         }
         match store.write(&bytes) {
             Ok(seq) => {
                 *source_hash = new_hash;
-                println!("imported source as snapshot seq={seq}");
+                tracing::info!(seq, bytes = bytes.len(), "imported source as snapshot");
                 true
             }
             Err(error) => {
-                println!("snapshot_write_failed: {error}");
+                tracing::warn!(%error, "snapshot_write_failed");
                 false
             }
         }
@@ -318,16 +374,10 @@ mod imp {
         bytes.hash(&mut hasher);
         hasher.finish()
     }
-
-    /// 协议版本在启动时打印一次，便于排查版本不匹配。
-    pub fn protocol_version() -> u16 {
-        VERSION
-    }
 }
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("ipc protocol v{}", imp::protocol_version());
     imp::run()
 }
 
