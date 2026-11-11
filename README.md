@@ -53,6 +53,21 @@ cargo run -p client-core -- --profile <profile.json> --reload-interval 2
 | `scripts/` | `clash2profile.py`、GEO 数据更新、DNS/UDP 端到端测试、C0a 采集脚本 |
 | `docs/` | 客户端设计规划、G1 门控、C0a 分布数据、C0d 实测报告、ADR |
 
+## 许可
+
+本项目自 2026-11-12 起采用 **MIT** 许可（见 `LICENSE`，SPDX: `MIT`）。G1 评审决议见 `docs/g1-gate-review.md` §8。
+
+第三方依赖与数据的许可需单独遵守，不因本项目采用 MIT 而自动兼容：
+
+| 来源 | 许可 | 分发要求 |
+|---|---|---|
+| `v2node-proto`（`v2node-rust` tag `v0.2.0`） | MPL-2.0 | 文件级弱 copyleft；保留许可文本与源码获取说明，修改过的 MPL 文件须继续以 MPL 开源 |
+| GEOIP 主源 `misakaio/chnroutes2` | CC-BY-SA 2.0 | 署名 + 相同方式共享；或改用 APNIC 源规避（见 `scripts/geoip-update.py --sources apnic`） |
+| `wintun.dll`（C1 后引入） | WireGuard LLC 预编译二进制许可 | 随包保留声明文本 |
+| 其余 Rust crate | 各 crate 自身 LICENSE | 发布前跑一次依赖许可扫描 |
+
+MIT 与 MPL-2.0 可以共存：MPL 只覆盖其自身文件，不要求整个组合作品开源；但分发二进制时仍须附 MPL-2.0 文本与对应源码获取方式。自研路线不打包 Mihomo / sing-box，因此 §3 历史清单中的 GPL 分发义务不适用。**本文是工程记录，不是法律意见**；正式发布前建议法务复核一次。
+
 ## 注意
 
 - **不要提交任何订阅地址、token、节点 IP、SSH 路径或密钥**。本仓库预期公开。
