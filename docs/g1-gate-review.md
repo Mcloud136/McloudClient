@@ -15,7 +15,7 @@
 | C0a 用户侧客户端版本分布 | 目标用户 Mihomo / sing-box / Xray / 其他占比、Windows 占比、最低支持版本 | **已完成（2026-11-11 20:30）** | 数据见 `docs/benchmark-results/2026-11-11-c0a-client-distribution.md`；面板机只读 SSH 已提供（root@<PANEL_IP>:2026），实测数据源 `/www/wwwlogs/<PANEL_ACCESS_LOG>` 订阅命中 **1275 条**（8 天窗口），可识别率 99.4% |
 | C0b 提前重构 | 抽 `v2node-proto` crate | **第一步完成 + Linux E2E/Xray 互通已验证 / 第二步待做** | `docs/benchmark-results/2026-11-11-c0b-after.md`、`2026-11-11-c0b-linux-e2e.md`；`make quality` 56 passed/0 failed、E2E 三连全过、Xray 26.11.9 互通完整 |
 | C0c 加密节点灰度 | 独立节点/端口/订阅 + 单用户，产出握手耗时、CPU、回滚演练 | **已完成（2026-11-11 17:14 上线，生产在用）** | <NODE_HOST> / NodeID 10 启用 `mlkem768x25519plus`，面板 id 10–19 全量配置；本机 `PROBE_OK` 6 ms、经 Cloudflare 500 ms。**未收口**：约 62% 握手失败来自未刷新订阅的老客户端，处置待定，见 `docs/HANDOVER.md` P0-2 |
-| C0d Windows 链路 PoC | 全链路跑通 + 6 条通过线 | **未执行** | 依赖 C0c 的加密节点与内核二进制（需 pin 版本 + SHA-256）；规格见本文 §6 |
+| C0d Windows 链路 PoC | 全链路跑通 + 6 条通过线 | **部分完成（4/6）** | 2026-11-12 实测：`client-core` 的 TCP/UDP/域名/1 MiB/DNS 通过（UDP 有服务端 `command=2` 日志证据）；Mihomo v1.19.34（已 pin + SHA-256）TCP/域名/1 MiB 通过，UDP/DNS 因内核对 53 端口硬编码 DIRECT 而未通过；自愈与 24 h 未执行。见 `docs/benchmark-results/2026-11-12-c0d-windows-poc.md` |
 | C0e 性能基线 | 三层基准 + 四维指标 | **完成** | `docs/benchmark-results/`（L1/L2/L3/criterion/总报告） |
 | Go 内核对照组 | 同机同规则集同负载跑 W1–W10 | **阻塞 → 部分就绪** | 构建机 `<BUILD_HOST_IP>` 现已可达（SSH root + 面板密钥），但 `go` 未安装；需先装 Go + 拉取 Mihomo/sing-box 二进制，约 2–3 人日 |
 | 许可评审 | 正式结论 | **待评审** | 事实与待确认项见本文 §3；本文不是法律意见 |
