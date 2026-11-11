@@ -10,7 +10,6 @@ pub mod dns;
 pub mod geo;
 pub mod health;
 pub mod ipc;
-pub mod logging;
 pub mod outbound;
 pub mod profile;
 pub mod relay;
@@ -20,3 +19,6 @@ pub mod rules;
 pub mod service;
 pub mod socks5;
 pub mod udp;
+
+/// 文件日志与内核共用一套实现；保留 `client_core::logging` 路径供既有调用方使用。
+pub use client_sidecar::logging;

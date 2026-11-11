@@ -302,8 +302,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "uuid",
  "v2node-proto",
  "windows-service",
@@ -313,13 +311,19 @@ dependencies = [
 name = "client-sidecar"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "clap",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 

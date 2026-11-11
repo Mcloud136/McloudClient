@@ -134,8 +134,17 @@ pub fn default_dir() -> PathBuf {
 ///
 /// 日志目录不可创建，或全局订阅器已被初始化时返回错误。
 pub fn init(log_dir: Option<PathBuf>) -> Result<WorkerGuard> {
+    init_with(log_dir, "core")
+}
+
+/// 同 [`init`]，但可指定文件名前缀（内核 `core`、控制面 `sidecar`）。
+///
+/// # Errors
+///
+/// 日志目录不可创建，或全局订阅器已被初始化时返回错误。
+pub fn init_with(log_dir: Option<PathBuf>, stem: &str) -> Result<WorkerGuard> {
     let dir = log_dir.unwrap_or_else(default_dir);
-    let writer = RollingWriter::new(&dir, "core", MAX_BYTES, KEEP)
+    let writer = RollingWriter::new(&dir, stem, MAX_BYTES, KEEP)
         .with_context(|| format!("open log dir {}", dir.display()))?;
     let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
@@ -150,7 +159,13 @@ pub fn init(log_dir: Option<PathBuf>) -> Result<WorkerGuard> {
         .map_err(|error| anyhow::anyhow!("install tracing subscriber: {error}"))?;
 
     install_panic_hook();
-    tracing::info!(dir = %dir.display(), max_bytes = MAX_BYTES, keep = KEEP, "file logging ready");
+    tracing::info!(
+        dir = %dir.display(),
+        stem,
+        max_bytes = MAX_BYTES,
+        keep = KEEP,
+        "file logging ready"
+    );
     Ok(guard)
 }
 

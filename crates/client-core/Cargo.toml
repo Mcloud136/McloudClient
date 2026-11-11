@@ -28,8 +28,6 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "t
 tokio-rustls = "0.26.6"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 tracing = "0.1.44"
-tracing-appender = "0.2.3"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.29.2", features = ["serde", "v4"] }
 # 复用节点服务端仓库的共享协议 crate（VLESS 帧 + mlkem 握手）。
 # 以 tag 固定版本，保证仓库可独立构建。
