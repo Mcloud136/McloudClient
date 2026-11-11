@@ -77,6 +77,14 @@ pub struct Config {
     /// IPC 命名管道名（如 `\\.\pipe\mcloud-client`）；缺省不启用控制面接口。
     #[arg(long)]
     pub ipc_pipe: Option<String>,
+
+    /// 日志目录；缺省为 `%ProgramData%\McloudClient\logs`。
+    #[arg(long)]
+    pub log_dir: Option<PathBuf>,
+
+    /// 以 Windows 服务方式运行（由服务控制管理器启动）。
+    #[arg(long, default_value_t = false)]
+    pub service: bool,
 }
 
 impl Config {
@@ -172,6 +180,8 @@ mod tests {
             profile_url: None,
             reload_interval: 0,
             ipc_pipe: None,
+            log_dir: None,
+            service: false,
         }
     }
 
