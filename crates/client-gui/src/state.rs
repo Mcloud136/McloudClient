@@ -18,13 +18,17 @@ const PROBE_RING: usize = 10;
 const SUMMARY_MAX: usize = 80;
 
 /// UI 发往后台 IPC 任务的命令。
+///
+/// 字段仅在 Windows 任务实现中被读取；Linux 构建下任务为桩，字段未读。
 #[derive(Debug, Clone)]
 pub enum Command {
     /// 对指定目标执行 `node_probe`。
     Probe {
         /// `host:port`，当前仅回环目标会被内核放行。
+        #[cfg_attr(not(windows), allow(dead_code))]
         address: String,
         /// 探测超时（毫秒）；受 IPC 请求超时 3 s 约束，取契约默认值。
+        #[cfg_attr(not(windows), allow(dead_code))]
         timeout_ms: u64,
     },
 }
@@ -45,7 +49,8 @@ impl Command {
 pub enum LinkStatus {
     /// 尚未建立连接，退避重试中。
     Connecting,
-    /// 已连接。
+    /// 已连接。仅在 Windows 任务实现中构造。
+    #[cfg_attr(not(windows), allow(dead_code))]
     Connected,
     /// 连接建立后中断。
     Disconnected,
@@ -119,6 +124,7 @@ pub struct State {
 
 impl State {
     /// 记录一次成功连接。
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_connected(&mut self) {
         self.link.connects += 1;
         self.link.status = LinkStatus::Connected;
@@ -127,6 +133,7 @@ impl State {
     }
 
     /// 记录一次连接尝试失败（仍在退避重试）。
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn set_connect_failed(&mut self, error: String) {
         self.link.failures += 1;
         self.link.status = LinkStatus::Connecting;
@@ -142,6 +149,7 @@ impl State {
     }
 
     /// 应用一轮内核 `metrics` 轮询结果。
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn apply_metrics(&mut self, metrics: Metrics) {
         self.kernel = Some(metrics);
     }

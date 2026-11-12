@@ -36,7 +36,8 @@ const MAX_BACKOFF_MS: u64 = 5_000;
 /// UI 请求超时上限（`PipeClient::request` 内部为 3 s）。
 #[cfg(windows)]
 const REQUEST_TIMEOUT_MS: u64 = 2_000;
-/// 退避起点。
+/// 退避起点（仅 Windows 任务实现使用）。
+#[cfg(windows)]
 const INITIAL_BACKOFF_MS: u64 = 100;
 
 /// 任务停止句柄：UI Drop 时自动触发，也可显式调用 [`TaskHandle::stop`]。
