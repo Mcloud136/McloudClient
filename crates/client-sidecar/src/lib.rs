@@ -3,6 +3,7 @@
 //! S1 范围：帧协议、`IpcTransport` / `Handler` trait、命名管道实现。
 //! 业务方法（status/reload）在 S2 接入内核，快照管理在 S3。
 
+pub mod contract;
 pub mod error;
 pub mod fetch;
 pub mod ipc;

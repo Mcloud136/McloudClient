@@ -11,8 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::{
-    context::AppContext, dns::FakeIp, outbound, relay, router::Route, rules::Target as RuleTarget,
-    udp,
+    context::AppContext, dns::FakeIp, metrics, outbound, relay, router::Route,
+    rules::Target as RuleTarget, udp,
 };
 
 /// SOCKS5 目标地址。
@@ -41,6 +41,7 @@ const REP_GENERAL_FAILURE: u8 = 0x01;
 
 /// 处理一条 SOCKS5 连接。
 pub async fn serve(mut stream: TcpStream, context: Arc<AppContext>) -> Result<()> {
+    let _active = metrics::on_accept(&context.metrics);
     stream.set_nodelay(true).context("set nodelay")?;
     handshake(&mut stream).await?;
     let (command, mut target) = read_request(&mut stream).await?;
@@ -79,7 +80,7 @@ pub async fn serve(mut stream: TcpStream, context: Arc<AppContext>) -> Result<()
     stream.write_all(&success_reply()).await?;
     stream.flush().await?;
 
-    let result = relay::bidirectional(stream, plain).await;
+    let result = relay::bidirectional(stream, plain, &context.metrics).await;
     for pump in pumps {
         pump.abort();
     }

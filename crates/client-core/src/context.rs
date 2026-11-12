@@ -12,13 +12,15 @@ use std::sync::{Arc, Mutex};
 use arc_swap::ArcSwap;
 use tokio::task::JoinHandle;
 
-use crate::{dns::FakeIp, health, router::Router};
+use crate::{dns::FakeIp, health, metrics::KernelMetrics, router::Router};
 
 /// 进程内共享状态。
 pub struct AppContext {
     router: ArcSwap<Router>,
     /// fake-ip 池（跨配置重载保留，避免已连接的客户端反查失败）。
     pub fakeip: Arc<FakeIp>,
+    /// 连接与字节计数器，供 IPC `metrics` 读取。
+    pub metrics: Arc<KernelMetrics>,
     health_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -29,6 +31,7 @@ impl AppContext {
         let context = Arc::new(Self {
             router: ArcSwap::from_pointee(router),
             fakeip,
+            metrics: Arc::new(KernelMetrics::default()),
             health_tasks: Mutex::new(Vec::new()),
         });
         context.restart_health();
