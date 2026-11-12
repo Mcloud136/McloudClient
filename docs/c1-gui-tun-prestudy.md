@@ -160,3 +160,35 @@ GUI 接入前需补齐 IPC 能力（当前只有 `status` / `reload` / 事件）
 **建议的 C1 首个里程碑**：`egui` 只读状态面板 + IPC `metrics` / `node_probe`，在 Release 构建下实测内存与 CPU，据此关闭 D1/D3；同期完成 WinTun 绑定的许可与成熟度复核（D2）。不写生产 TUN 代码，直到 D2 与 DNS 无泄漏验收方案通过评审。
 
 **明确不做（C1）**：汇编主体实现、Electron / CEF / WebView 壳、移动端、自有 `v2node://` 订阅格式、多节点的跨设备同步。
+
+## 9. 首个里程碑实测（2026-11-12，`client-gui` v0.1）
+
+按 §8 建议完成 `crates/client-gui`（egui 0.37 + glow，`default-features = false`，
+深色主题，事件驱动重绘）并实机验证（`s11b` 探测 20/20：连接/指标轮询/流量计数增长/
+Ctrl+P 探测 0.43 ms/断连退避/干净退出，PrintWindow 截图 + WinRT OCR 断言）。
+
+| 指标 | 实测 | 说明 |
+|---|---|---|
+| GUI 空闲 CPU（可见，15 s） | 0.000–0.417% | 远低于 FA 预算 ≤1.0% |
+| GUI 空闲 CPU（最小化，15 s） | 0.000–0.208% | 最小化时 eframe 不跑 egui pass，仅 logic 回调 |
+| GUI RSS / Private | **76–135 MiB / 73–127 MiB**（4 次运行） | 见下 |
+| 最小 eframe 应用（`examples/memory_floor.rs`） | 123.7 / 113.0 MiB | **框架地板**，GL 渲染器为 RTX 4070 硬件 GL 3.3（非软件回退） |
+| 业务增量（GUI − 地板） | ≈ −47 ～ +12 MiB | 波动主要由 GL 驱动分配与工作集修剪造成，与代码量级无关 |
+| 内核（对照） | RSS 16.5 / private 8.4 MiB | 稳定 |
+| `client-gui.exe` 体积 | 9.3 MiB | |
+
+**关键修正**：本预研引用的「egui 常驻 4–6 MB」与实测严重不符——egui 0.37 + glow +
+winit 在本机（RTX 4070 硬件 GL）的地板约为 **124 MiB**，甚至高于 WebView2 的公开
+数据（30–50 MB）。结论对 D1 的影响：
+
+1. **CPU 与功能维度 egui 达标**（空闲 ≤0.42%、事件驱动、单 exe）；
+2. **内存维度 egui 无优势**，「低内存优先」诉求在 egui+glow 路线上不成立；
+3. D1 **不关闭**，改为「有条件保留」：需用户在以下三项中裁决——
+   接受 ~80–130 MiB 常驻、试 `wgpu` 后端复测（可能引入 Vulkan/SwiftShader 依赖）、
+   或重启 Tauri 对比（先在本机实测 WebView2 基线，公开数据不可比）；
+4. D3（Zig）不因内存触发——地板来自 GL/驱动，非 Rust 运行时；Zig 原生 Win32 自绘
+   可做到更小，但控件成本高，仅在用户否决 egui 且 wgpu 复测不达标时再评审。
+
+另：面板标签暂用英文（egui 默认字体无 CJK）；中文 UI 需先做字体决策（系统字体
+加载的 RSS 代价 vs 内嵌子集字体的体积代价）。设计 token 集中在
+`crates/client-gui/src/theme.rs`，后续审美输入只改该文件。

@@ -1,6 +1,8 @@
 # C1 IPC 契约（v1，2026-11-12）
 
-- **状态**：已实现并实机验证（`status` / `reload` / `metrics` / `node_probe`）
+- **状态**：已实现并实机验证（`status` / `reload` / `metrics` / `node_probe`）；
+  **消费端已落地**：`crates/client-gui`（egui 只读面板，2026-11-12，实机 20/20，
+  见 `docs/c1-gui-tun-prestudy.md` §9）
 - **代码单一事实源**：`crates/client-sidecar/src/contract.rs`（方法名、载荷、错误码）
 - **相关**：ADR 0002（IPC / 配置 / 日志归属）、ADR 0003（维持自研 R2）、`docs/c1-gui-tun-prestudy.md` §5、`docs/client-design-plan.md` §9
 
@@ -106,5 +108,6 @@
 - 单元测试：`contract.rs`（载荷往返、回环白名单含绕过用例）、`metrics.rs`（RAII 计数）、`relay.rs`（字节计数）。
 - 实机回归：`D:\wxmuma\_c0d_test\s10_ipc_contract_probe.py`（未入库），覆盖正常路径、未知方法、参数校验、越权目标、连接/字节计数增长与响应脱敏。
 - 既有回归：s5–s9 不受影响（帧协议与 `status` / `reload` 语义未变）；它们用外部域名与 `--socks5-hostname`，不受本机 `NO_PROXY` 影响。
+- GUI 回归（2026-11-12）：`D:\wxmuma\_c0d_test\s11b_gui_probe.py` **20/20**（PrintWindow 截图 + WinRT OCR 断言面板内容、计数增长、探测结果、断连状态、干净退出）；被测 `client-gui.exe` 9.3 MiB，SHA-256 `56245afaa940869c8242e9013b61e5fe3f5c2439432c2a8ba270f6999f05f1b7`。
 - 本轮被测二进制：`target/release/client-core.exe`，7,683,584 B，SHA-256 `c10e9ad58bb7664125bf91dd6d2e7c71a1bef65e743fce305bd9a345e517b6e8`。
 - **测量前提**：本机 `NO_PROXY=127.0.0.1,localhost,::1`，任何回环 workload 的 curl 都必须带 `--noproxy ""`，否则会绕过 SOCKS5 直连目标、计数不增长、数据失效。本轮 18/18 回归正是靠 `connections_total` / `bytes_down` 增长独立证明了流量确实经过内核。

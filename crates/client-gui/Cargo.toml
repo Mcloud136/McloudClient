@@ -1,0 +1,30 @@
+[package]
+name = "client-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+client-sidecar = { path = "../client-sidecar" }
+serde_json = "1"
+tokio = { version = "1.54", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+tracing = "0.1"
+
+# GUI：egui + glow 渲染器（预研 §5 决策 D1 的验证对象）。
+# default-features = false 去掉 accesskit/persistence 等不需要的能力；
+# default_fonts 只含拉丁字体（无 CJK，中文 UI 待字体决策，见 docs/c1-gui-tun-prestudy.md）；
+# x11/wayland 仅在 Linux 目标上生效，保证双平台 CI 可编译。
+eframe = { version = "0.37", default-features = false, features = [
+  "glow",
+  "default_fonts",
+  "x11",
+  "wayland",
+] }
+
+[dev-dependencies]
+# 集成测试需要为桩内核实现 client-sidecar::Handler。
+async-trait = "0.1"
+
+[lints]
+workspace = true
