@@ -155,12 +155,13 @@ v1 报告（`d42a954`）的数据全部来自 Debug 构建 + 先 meow 后 client
 | # | 项 | 原因 | 影响 |
 |---|---|---|---|
 | 1 | **真实节点加密链路** | 需要把项目测试订阅写入第三方内核的 YAML 配置；该配置生成被本机安全策略拦截，未重试、未绕过 | 无法比较握手、加密记录层、真实 WAN 延迟与吞吐，而这恰是两者最核心的差异 |
-| 2 | **`vless-encryption` feature 是否启用** | 源码 `crates/meow-config/src/proxy_parser.rs:2037` 与 CHANGELOG 显示 meow-rs **支持** `mlkem768x25519plus`（修正了仅依据 README Features 清单的初步判断），但该能力是编译期 feature；官方 Windows 产物是否启用未验证 | 即便将来做链路对比，也需先用 `-t` 校验加密配置能否通过 |
+| 2 | ~~**`vless-encryption` feature 是否启用**~~ ✅ **已实测启用（2026-11-12 14:08）** | 用纯虚构配置（dummy UUID、dummy 密钥、`127.0.0.1`、`example.com`，**不含任何真实凭据**）跑 `meow -t`：`encryption: none` 通过；`mlkem768x25519plus.native.1rtt.AAAA` 报 `vless: failed to use encryption: empty nfsPKeysBytes`，即进入了真实密钥解析路径，而非源码中 feature 关闭时的 `requires the 'vless-encryption' Cargo feature; rebuild with --features ...` 分支。源码依据：`proxy_parser.rs:2816/2827` | 官方产物承接本项目加密能力的**编译期障碍已排除**；但端到端握手与真实节点链路仍未验证 |
 | 3 | meow-rs 的服务化、崩溃恢复、日志持久化 | 本轮未纳入 workload | §5 相关行仅为文档记载，非实测 |
 | 4 | 24 h 长稳 | 按 2026-11-12 流程调整已移出 C0d，归入 FA 最终验收 | 不属本轮范围 |
 | 5 | 多节点测速与负载均衡 | 需要多节点配置与真实链路 | 用户投诉的核心诉求（G1 立项动因）未被覆盖 |
 | 6 | 双内核同时运行的互扰 | 交错采样让两侧共享同一时段的 CPU/缓存，是消除时间漂移的代价 | 绝对值不代表单进程独占时的性能；只用于**相对**比较 |
 | 7 | 功能面不对称 | 见 §5 | 体积、RSS、吞吐量级差异不能推导出选型结论 |
+| 8 | meow-rs 配置校验的静默降级 | 同一次 `-t` 实测中，加密节点解析失败只产生 `WARN Failed to parse proxy`，该 proxy 被跳过，GLOBAL selector 降级为 `DIRECT`，而 `-t` 仍输出 `Configuration test passed` 且 RC=0 | 若产品依赖这类校验结果判定节点可用性，可能把「配置解析失败」呈现为「节点不可用」；真实合法密钥下是否同样如此未验证。**这是行为观察，不是投诉根因结论**（用户已判定现场归因不可执行） |
 
 **v1 的第 1 项边界（本项目 Release 构建受阻）已关闭**：`cargo build --release --workspace -j 24` 在本机成功；此前的「`aws-lc-sys` 编不了」判断有误，真实原因是构建进程被反复中断、退出码被管道掩盖、且默认 32 jobs 并行度过高。
 
@@ -182,7 +183,7 @@ v1 报告（`d42a954`）的数据全部来自 Debug 构建 + 先 meow 后 client
 
 **建议的补齐顺序**：
 
-1. 在用户明确授权使用测试订阅、且第三方加密配置通过 `meow -t` 校验后，补做真实节点链路对比：握手耗时、1 MiB / 5 MiB 下载、DNS 无泄漏、多节点测速与负载均衡。
+1. 在用户明确授权使用测试订阅、且第三方加密配置通过 `meow -t` 校验后，补做真实节点链路对比：握手耗时、1 MiB / 5 MiB 下载、DNS 无泄漏、多节点测速与负载均衡（编译期 feature 障碍已排除，见 §6 第 2 项）。若考虑改用 meow-rs 作为内核，还需用 C0d 用例复测其 UDP/DNS 行为，确认是否继承 Mihomo 的负面证据。
 2. 按 `docs/benchmark-spec.md` 的 W1–W10 做更长窗口的交错采样，收敛 p99 与 5 MiB 吞吐波动。
 3. FA 最终验收时按 20 min 窗口、Release 构建、三项分别计量重测空闲 CPU。
 4. 发布前跑 `cargo deny` 复核 `v2node-proto`(MPL-2.0) 与 GEOIP 数据许可。
@@ -197,4 +198,5 @@ v1 报告（`d42a954`）的数据全部来自 Debug 构建 + 先 meow 后 client
 |---|---|---|
 | v1 | `d42a954` | 首次对比：本项目 Debug + 顺序采样；结论受构建不对等影响 |
 | v1.1 | `9423d8c` | 记录 Release 产出与 SHA-256，但**未重跑** workload，明确标注边界仍有效 |
-| **v2（本版）** | 本次 | 两侧 Release；双内核并发 + 请求交错 + 两轮反转顺序；**重写 §2/§3/§6/§7/§8 全部数据与结论**，新增 §4 偏差分析；v1 数据降级为历史记录 |
+| **v2** | `e421cdb` | 两侧 Release；双内核并发 + 请求交错 + 两轮反转顺序；**重写 §2/§3/§6/§7/§8 全部数据与结论**，新增 §4 偏差分析；v1 数据降级为历史记录 |
+| **v2.1** | 本次 | 用纯虚构配置实测官方产物已启用 `vless-encryption`，关闭 §6 第 2 项；新增 §6 第 8 项「配置校验静默降级」行为观察；§8 建议补入 UDP/DNS 复测 |
