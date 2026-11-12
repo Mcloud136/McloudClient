@@ -1,8 +1,9 @@
-# C1 IPC 契约（v1，2026-11-12）
+# C1 IPC 契约（v1.1，2026-11-12）
 
-- **状态**：已实现并实机验证（`status` / `reload` / `metrics` / `node_probe`）；
-  **消费端已落地**：`crates/client-gui`（egui 只读面板，2026-11-12，实机 20/20，
-  见 `docs/c1-gui-tun-prestudy.md` §9）
+- **状态**：已实现并实机验证（`status` / `reload` / `metrics` / `node_probe` /
+  `nodes` / `probe_nodes` / `select_node`）；
+  **消费端已落地**：`crates/client-gui`（egui 只读面板 + NODES & BALANCE 区块，
+  2026-11-12，实机 20/20 + 12/12，见 `docs/c1-gui-tun-prestudy.md` §9 / §10）
 - **代码单一事实源**：`crates/client-sidecar/src/contract.rs`（方法名、载荷、错误码）
 - **相关**：ADR 0002（IPC / 配置 / 日志归属）、ADR 0003（维持自研 R2）、`docs/c1-gui-tun-prestudy.md` §5、`docs/client-design-plan.md` §9
 
@@ -35,12 +36,17 @@
 |---|---|---|
 | `status` | ✅ 既有 | 规则数、配置版本、uptime，`detail=true` 时附 fake-ip 条目与脱敏 source |
 | `reload` | ✅ 既有 | 重新拉取并原子替换路由器，附事件推送 |
-| `metrics` | ✅ 本轮新增 | 连接与字节计数、规则/版本/uptime |
-| `node_probe` | ✅ 本轮新增 | TCP 连接延迟探测（网络测试的最小可测形态） |
+| `metrics` | ✅ 已实现 | 连接与字节计数、规则/版本/uptime |
+| `node_probe` | ✅ 已实现 | 单个回环目标的 TCP 连接延迟探测 |
+| `nodes` | ✅ v1.1 新增 | 策略组与节点可观测快照（组/模式/选中/健康/TCP RTT） |
+| `probe_nodes` | ✅ v1.1 新增 | 对所有已登记节点并发 TCP 测速（多节点网络测试） |
+| `select_node` | ✅ v1.1 新增 | 手动锁定策略组成员 / 恢复自动（负载均衡可控） |
 | `log_tail` | 规划 | 环形日志尾部读取，供 GUI 诊断页 |
 | `diagnostics` | 规划 | 连接统计、DNS 泄漏自检、崩溃取证导出 |
 
 `IMPLEMENTED_METHODS` / `PLANNED_METHODS` 定义在 `contract.rs`，二者不允许重叠（有单测守护）。
+预研 §5 提到的 `balance_policy` 不由独立方法承担：`select_node` 负责锁定/解锁，
+`nodes` 负责暴露当前策略与选中结果，避免「读」「写」两套语义分裂。
 
 ## 4. 载荷定义
 
@@ -77,7 +83,44 @@
 
 **探测失败是正常结果，不作为 IPC 错误返回**。参数非法或目标越界才返回错误码。
 
-回环白名单用 `IpAddr::is_loopback` 判定 IP 字面量，另允许 `localhost`；因此 `127.0.0.1.evil.example` 这类形近域名会被拒绝。这是防止 IPC 被当作任意内网探测入口（SSRF）的临时边界；C1 后续里程碑将扩展为「配置中已登记节点」白名单，并加上多节点测速与负载均衡。
+`node_probe` 的回环白名单用 `IpAddr::is_loopback` 判定 IP 字面量，另允许 `localhost`；因此 `127.0.0.1.evil.example` 这类形近域名会被拒绝。该边界**保持不变**；多节点测速由独立的 `probe_nodes` 承担，见 §4.3。
+
+### 4.3 `nodes`（请求参数可省略）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `groups[].name` / `kind` | string | 组名与类型（`select` / `url-test` / `fallback` / `load-balance`） |
+| `groups[].mode` | enum | `auto` / `manual`；`manual` 表示被 `select_node` 锁定 |
+| `groups[].selected` | string | 当前生效成员；`load-balance` 的 `auto` 模式是「下一次」预览值 |
+| `groups[].members` | string[] | 组成员名，保持 profile 顺序 |
+| `nodes[].name` | string | **仅节点名**，无地址/UUID/凭据 |
+| `nodes[].health_ms` | u32? | 经代理的 HTTP 健康探测耗时（未知/失败为 `null`） |
+| `nodes[].tcp_rtt_ms` / `tcp_ok` / `tcp_error` | 观测值 | 最近一次 `probe_nodes` 的 TCP 连接结果 |
+
+`load-balance` 的预览值用 `AtomicUsize::load` 读取，**不消耗**轮询计数器，因此查询快照不会干扰选路。
+
+### 4.4 `probe_nodes`
+
+请求：`{ "timeout_ms": 1..=10000 }`，省略 `params` 或传 `null` 时取默认 2000。
+
+响应：`results[]`，每项含 `name` / `reachable` / `rtt_ms` / `error_code`（`connect_failed` / `timeout`）。
+
+- 目标来自 profile 中**已登记节点**，并发发起 TCP 连接探测；失败是正常结果，不是 IPC 错误。
+- 结果缓存在内核供 `nodes` 查询，**不写入健康表**：`url-test` 仍由 `health.rs` 的经代理 HTTP 探测驱动，两者语义不同，不得混用。
+- 每次探测写一条结构化日志 `node tcp probe node=<名称> reachable=… rtt_ms=…`，可导出且不含地址。
+
+### 4.5 `select_node`
+
+请求：`{ "group": "...", "node": "..." | "auto" | null }`。
+
+| 规则 | 说明 |
+|---|---|
+| 锁定 | 手动选择优先于 `url-test` / `fallback` / `load-balance` 等任何自动策略 |
+| 解锁 | `node = "auto"` / `null` 恢复自动 |
+| 热重载 | 锁定迁移到新路由器；新配置中已不存在的成员自动丢弃 |
+| 校验 | 组不存在 → `unknown_group`；成员不在组内 → `unknown_node` |
+
+响应：`{ "group", "mode", "selected" }`，并写一条 `node selection changed` 日志。
 
 ## 5. 错误码
 
@@ -89,6 +132,8 @@
 | `fetch_failed` / `validate_failed` | `reload` 拉取 / 构建失败（既有） |
 | `handler_error` | 处理器内部错误 |
 | `serialize_failed` | 响应序列化异常 |
+| `unknown_group` | `select_node` 的策略组不存在 |
+| `unknown_node` | `select_node` 的节点不在该组成员列表中 |
 
 ## 6. 安全边界
 
@@ -96,6 +141,8 @@
 2. `node_probe` 当前只放行回环，避免未授权的内网扫描；扩展到真实节点前需先过威胁评审。
 3. 规划中的 `log_tail` 必须先脱敏（节点地址、UUID、加密串、订阅链接）再下发给 GUI。
 4. GUI 若使用 WebView，`token` 不得离开 Rust 层；本契约的响应字段设计已按此约束裁剪。
+5. `probe_nodes` 是**显式调用触发的主动外连**，目标限定为配置中已登记的节点，不自动执行、不接受任意地址；响应与日志均只出现节点名。`node_probe` 的回环白名单不受影响。
+6. `nodes` / `probe_nodes` / `select_node` 的全部响应字段经单测与实机逐帧扫描守护：节点地址、端口、UUID、加密串、订阅链接一律不回显。
 
 ## 7. 版本与兼容
 
@@ -108,6 +155,10 @@
 - 单元测试：`contract.rs`（载荷往返、回环白名单含绕过用例）、`metrics.rs`（RAII 计数）、`relay.rs`（字节计数）。
 - 实机回归：`D:\wxmuma\_c0d_test\s10_ipc_contract_probe.py`（未入库），覆盖正常路径、未知方法、参数校验、越权目标、连接/字节计数增长与响应脱敏。
 - 既有回归：s5–s9 不受影响（帧协议与 `status` / `reload` 语义未变）；它们用外部域名与 `--socks5-hostname`，不受本机 `NO_PROXY` 影响。
+- v1.1 实机回归（2026-11-12，脚本在仓库外 `_c0d_test/`）：`s12_nodes_balance_probe.py`
+  **32/32**，`s12b_gui_nodes_probe.py` **12/12**；既有 `s10_ipc_contract_probe.py`
+  **18/18**、`s11b_gui_probe.py` **20/20**。全量数据与边界见
+  `docs/benchmark-results/2026-11-12-c1-nodes-balance.md`。
 - GUI 回归（2026-11-12）：`D:\wxmuma\_c0d_test\s11b_gui_probe.py` **20/20**（PrintWindow 截图 + WinRT OCR 断言面板内容、计数增长、探测结果、断连状态、干净退出）；被测 `client-gui.exe` 9.3 MiB，SHA-256 `82a58be69d979616f2949682496e89f6b10b4969083ba3c1d4ca00002e8038e1`（深色主题修复后二进制）。
 - 本轮被测二进制：`target/release/client-core.exe`，7,683,584 B，SHA-256 `c10e9ad58bb7664125bf91dd6d2e7c71a1bef65e743fce305bd9a345e517b6e8`。
 - **测量前提**：本机 `NO_PROXY=127.0.0.1,localhost,::1`，任何回环 workload 的 curl 都必须带 `--noproxy ""`，否则会绕过 SOCKS5 直连目标、计数不增长、数据失效。本轮 18/18 回归正是靠 `connections_total` / `bytes_down` 增长独立证明了流量确实经过内核。

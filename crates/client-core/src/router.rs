@@ -3,23 +3,25 @@
 //! 内置策略：`DIRECT`（直连）、`REJECT`（拒绝）。
 //!
 //! 策略组选择：
-//! - `select`：取首个成员（无交互 UI，暂不支持手动切换）；
+//! - `select`：取首个成员，可被 `select_node` 手动锁定；
 //! - `url-test`：取健康检查延迟最低的成员，全不可用时退化为首个；
 //! - `fallback`：取第一个健康成员，全不可用时退化为首个；
 //! - `load-balance`：轮询。
 //!
+//! 手动锁定（`selections`）优先于任何自动策略，并在配置热重载后继承。
 //! `RULE-SET` 在构建时**预展开**成具体规则，运行期零间接开销。
 
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use client_sidecar::contract::{AUTO_NODE, GroupMode, NodeGroupView, NodeView, NodesSnapshot};
 
 use crate::{
     geo::GeoData,
@@ -66,6 +68,14 @@ impl HealthTable {
     }
 }
 
+/// `set_selection` 的失败原因（由 IPC 层映射为错误码）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionError {
+    UnknownGroup,
+    UnknownNode,
+    Poisoned,
+}
+
 /// 路由器。
 pub struct Router {
     proxies: HashMap<String, Proxy>,
@@ -74,6 +84,8 @@ pub struct Router {
     round_robin: AtomicUsize,
     geo: Arc<GeoData>,
     health: HealthTable,
+    /// 用户手动锁定的组选择：组名 → 直接成员名。
+    selections: RwLock<HashMap<String, String>>,
 }
 
 impl Router {
@@ -129,6 +141,7 @@ impl Router {
             round_robin: AtomicUsize::new(0),
             geo,
             health: HealthTable::default(),
+            selections: RwLock::new(HashMap::new()),
         })
     }
 
@@ -155,6 +168,139 @@ impl Router {
     #[must_use]
     pub fn health_of(&self, name: &str) -> Option<u32> {
         self.health.get(name)
+    }
+
+    /// 锁定或解锁策略组的成员。
+    ///
+    /// `node` 为 `None` 或 `"auto"` 时恢复自动策略；手动锁定优先于
+    /// `url-test` / `fallback` / `load-balance` 等任何自动选路结果。
+    ///
+    /// # Errors
+    ///
+    /// 组不存在、成员不在组内或选择表被污染时返回 [`SelectionError`]。
+    pub fn set_selection(
+        &self,
+        group_name: &str,
+        node: Option<&str>,
+    ) -> Result<(), SelectionError> {
+        let group = self
+            .groups
+            .get(group_name)
+            .ok_or(SelectionError::UnknownGroup)?;
+        let mut guard = self
+            .selections
+            .write()
+            .map_err(|_| SelectionError::Poisoned)?;
+        match node {
+            Some(name) if name != AUTO_NODE => {
+                if !group.proxies.iter().any(|member| member == name) {
+                    return Err(SelectionError::UnknownNode);
+                }
+                guard.insert(group_name.to_owned(), name.to_owned());
+            }
+            _ => {
+                guard.remove(group_name);
+            }
+        }
+        Ok(())
+    }
+
+    /// 热重载后继承旧路由器的手动锁定；成员已消失的锁定自动丢弃。
+    pub fn inherit_selections(&self, previous: &Self) {
+        let (Ok(source), Ok(mut target)) = (previous.selections.read(), self.selections.write())
+        else {
+            return;
+        };
+        for (group_name, node) in source.iter() {
+            let still_valid = self
+                .groups
+                .get(group_name)
+                .is_some_and(|group| group.proxies.iter().any(|member| member == node));
+            if still_valid {
+                target.insert(group_name.clone(), node.clone());
+            }
+        }
+    }
+
+    /// 可观测快照：策略组选路状态 + 已登记节点健康状态。
+    ///
+    /// TCP 探测字段由 IPC 层合并（此处保持 `None`）；载荷不含节点地址与凭据。
+    #[must_use]
+    pub fn node_snapshot(&self) -> NodesSnapshot {
+        let health = self.health.snapshot();
+        let selections = self
+            .selections
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+
+        let mut groups: Vec<NodeGroupView> = self
+            .groups
+            .values()
+            .map(|group| {
+                let (mode, selected) = match selections.get(&group.name) {
+                    Some(manual) => (GroupMode::Manual, manual.clone()),
+                    None => (GroupMode::Auto, self.preview_member(group).to_owned()),
+                };
+                NodeGroupView {
+                    name: group.name.clone(),
+                    kind: group.kind.clone(),
+                    mode,
+                    selected,
+                    members: group.proxies.clone(),
+                }
+            })
+            .collect();
+        groups.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let mut nodes: Vec<NodeView> = self
+            .proxies
+            .values()
+            .map(|proxy| NodeView {
+                name: proxy.name.clone(),
+                health_ms: health.get(&proxy.name).copied().flatten(),
+                ..NodeView::default()
+            })
+            .collect();
+        nodes.sort_by(|left, right| left.name.cmp(&right.name));
+        NodesSnapshot { groups, nodes }
+    }
+
+    /// 已登记节点的 TCP 探测目标（名称 + `host:port`），仅供内核内部使用。
+    ///
+    /// 地址不会出现在任何 IPC 响应中。
+    #[must_use]
+    pub fn probe_targets(&self) -> Vec<(String, String)> {
+        let mut targets: Vec<(String, String)> = self
+            .proxies
+            .values()
+            .map(|proxy| {
+                let host = if proxy.server.contains(':') && !proxy.server.starts_with('[') {
+                    format!("[{}]", proxy.server)
+                } else {
+                    proxy.server.clone()
+                };
+                (proxy.name.clone(), format!("{host}:{}", proxy.port))
+            })
+            .collect();
+        targets.sort_by(|left, right| left.0.cmp(&right.0));
+        targets
+    }
+
+    /// 快照用的「当前/下一次」成员预览，不消耗轮询计数器。
+    fn preview_member<'a>(&self, group: &'a ProxyGroup) -> &'a str {
+        if group.proxies.is_empty() {
+            return "";
+        }
+        match group.kind.as_str() {
+            "load-balance" => {
+                let index = self.round_robin.load(Ordering::Relaxed) % group.proxies.len();
+                &group.proxies[index]
+            }
+            "url-test" => self.pick_fastest(group),
+            "fallback" => self.pick_first_alive(group),
+            _ => &group.proxies[0],
+        }
     }
 
     /// 规则条数（含规则集展开后的条目）。
@@ -215,6 +361,14 @@ impl Router {
     fn resolve_depth(&self, name: &str, depth: usize) -> Result<Proxy> {
         if depth > 16 {
             bail!("proxy group nesting too deep");
+        }
+        if let Some(manual) = self
+            .selections
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(name).cloned())
+        {
+            return self.resolve_depth(&manual, depth + 1);
         }
         if let Some(proxy) = self.proxies.get(name) {
             return Ok(proxy.clone());
@@ -434,6 +588,106 @@ mod tests {
         assert_eq!(proxy_name(router.route(&target).unwrap()), "a");
         assert_eq!(proxy_name(router.route(&target).unwrap()), "b");
         assert_eq!(proxy_name(router.route(&target).unwrap()), "a");
+    }
+
+    #[test]
+    fn manual_selection_overrides_auto_and_restores() {
+        let router = router(&["MATCH,lb"]);
+        let target = Target::Domain("x.test".to_owned());
+
+        assert_eq!(
+            router.set_selection("lb", Some("missing")),
+            Err(SelectionError::UnknownNode)
+        );
+        assert_eq!(
+            router.set_selection("no-such-group", Some("a")),
+            Err(SelectionError::UnknownGroup)
+        );
+
+        router.set_selection("lb", Some("b")).unwrap();
+        assert_eq!(proxy_name(router.route(&target).unwrap()), "b");
+        assert_eq!(proxy_name(router.route(&target).unwrap()), "b");
+        let view = router
+            .node_snapshot()
+            .groups
+            .into_iter()
+            .find(|group| group.name == "lb")
+            .expect("lb group");
+        assert_eq!(view.mode, GroupMode::Manual);
+        assert_eq!(view.selected, "b");
+
+        // auto / None 都表示恢复自动策略。
+        router.set_selection("lb", Some(AUTO_NODE)).unwrap();
+        assert_eq!(proxy_name(router.route(&target).unwrap()), "a");
+        router.set_selection("lb", Some("b")).unwrap();
+        router.set_selection("lb", None).unwrap();
+        assert_eq!(proxy_name(router.route(&target).unwrap()), "b");
+    }
+
+    #[test]
+    fn selection_survives_reload_but_drops_missing_members() {
+        let old = router(&["MATCH,lb"]);
+        old.set_selection("lb", Some("b")).unwrap();
+
+        let next = router(&["MATCH,lb"]);
+        next.inherit_selections(&old);
+        assert_eq!(
+            next.node_snapshot()
+                .groups
+                .into_iter()
+                .find(|group| group.name == "lb")
+                .expect("lb group")
+                .mode,
+            GroupMode::Manual
+        );
+
+        // 新配置不再包含 b -> 锁定自动丢弃。
+        let shrunk = router_with(&["MATCH,lb"], vec![group("lb", "load-balance", &["a"])]);
+        shrunk.inherit_selections(&old);
+        assert_eq!(
+            shrunk
+                .node_snapshot()
+                .groups
+                .into_iter()
+                .find(|group| group.name == "lb")
+                .expect("lb group")
+                .mode,
+            GroupMode::Auto
+        );
+    }
+
+    #[test]
+    fn node_snapshot_is_sorted_and_redacted() {
+        let router = router(&["MATCH,lb"]);
+        router.set_health("b", Some(42));
+        let snapshot = router.node_snapshot();
+        assert_eq!(
+            snapshot
+                .nodes
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(snapshot.nodes[1].health_ms, Some(42));
+        assert_eq!(snapshot.nodes[1].tcp_ok, None);
+        // 节点地址/凭据不得进入任何序列化载荷。
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        for forbidden in ["example.com", "11111111", "443", "server", "uuid"] {
+            assert!(!encoded.contains(forbidden), "leaked: {forbidden}");
+        }
+    }
+
+    #[test]
+    fn probe_targets_are_sorted_and_well_formed() {
+        let targets = router(&["MATCH,lb"]).probe_targets();
+        assert_eq!(
+            targets,
+            vec![
+                ("a".to_owned(), "a.example.com:443".to_owned()),
+                ("b".to_owned(), "b.example.com:443".to_owned()),
+            ]
+        );
     }
 
     #[test]

@@ -45,8 +45,12 @@ impl AppContext {
     }
 
     /// 原子替换路由器，并按新配置重启健康检查。
+    ///
+    /// 用户手动锁定的节点选择会迁移到新路由器；新配置中已不存在的成员自动丢弃。
     pub fn replace_router(self: &Arc<Self>, router: Router) {
         tracing::info!(rules = router.rule_count(), "router reloaded");
+        let previous = self.router.load_full();
+        router.inherit_selections(&previous);
         self.router.store(Arc::new(router));
         self.restart_health();
     }

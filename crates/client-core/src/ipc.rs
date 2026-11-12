@@ -1,9 +1,12 @@
 //! 内核侧 IPC 方法处理。
 //!
-//! 提供 `status` / `reload` / `metrics` / `node_probe`。`reload` 复用与定时重载
-//! 相同的「先构建、后替换」路径，失败时保留现有路由器。
+//! 提供 `status` / `reload` / `metrics` / `node_probe` / `nodes` /
+//! `probe_nodes` / `select_node`。`reload` 复用与定时重载相同的
+//! 「先构建、后替换」路径，失败时保留现有路由器。
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -11,15 +14,18 @@ use async_trait::async_trait;
 use client_sidecar::{
     EventSink, Handler, IpcError,
     contract::{
-        ERR_FORBIDDEN_TARGET, ERR_INVALID_PARAMS, ERR_UNKNOWN_METHOD, MAX_PROBE_TIMEOUT_MS,
-        METHOD_METRICS, METHOD_NODE_PROBE, METHOD_RELOAD, METHOD_STATUS, NodeProbeParams,
-        NodeProbeResult, is_loopback_target,
+        ERR_FORBIDDEN_TARGET, ERR_INVALID_PARAMS, ERR_UNKNOWN_GROUP, ERR_UNKNOWN_METHOD,
+        ERR_UNKNOWN_NODE, MAX_PROBE_TIMEOUT_MS, METHOD_METRICS, METHOD_NODE_PROBE, METHOD_NODES,
+        METHOD_PROBE_NODES, METHOD_RELOAD, METHOD_SELECT_NODE, METHOD_STATUS, NodeProbeOutcome,
+        NodeProbeParams, NodeProbeResult, ProbeNodesParams, ProbeNodesResult, SelectNodeParams,
+        SelectNodeResult, is_loopback_target,
     },
 };
+use futures::future::join_all;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 
-use crate::{context::AppContext, geo::GeoData, reload};
+use crate::{context::AppContext, geo::GeoData, reload, router::SelectionError};
 
 pub struct KernelHandler {
     context: Arc<AppContext>,
@@ -27,6 +33,8 @@ pub struct KernelHandler {
     geo: Arc<GeoData>,
     version: AtomicU64,
     started: Instant,
+    /// 最近一次 `probe_nodes` 的结果，按节点名索引；不写健康表，避免污染 `url-test`。
+    probe_cache: Mutex<HashMap<String, NodeProbeOutcome>>,
 }
 
 impl KernelHandler {
@@ -38,6 +46,7 @@ impl KernelHandler {
             geo,
             version: AtomicU64::new(0),
             started: Instant::now(),
+            probe_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -95,6 +104,137 @@ impl KernelHandler {
         })
     }
 
+    /// 策略组与节点的可观测快照（不含节点地址与凭据）。
+    fn nodes_body(&self) -> Result<Value, IpcError> {
+        let mut snapshot = self.context.router().node_snapshot();
+        if let Ok(cache) = self.probe_cache.lock() {
+            for node in &mut snapshot.nodes {
+                if let Some(outcome) = cache.get(&node.name) {
+                    node.tcp_ok = Some(outcome.reachable);
+                    node.tcp_rtt_ms = outcome.rtt_ms;
+                    node.tcp_error = outcome.error_code.clone();
+                }
+            }
+        }
+        serde_json::to_value(snapshot).map_err(|error| IpcError::Remote {
+            code: "serialize_failed".to_owned(),
+            message: error.to_string(),
+        })
+    }
+
+    /// 对所有**配置中已登记**的节点并发做 TCP 连接探测。
+    ///
+    /// 与 `node_probe` 的回环白名单不同：这里的目标来自 profile 本身，属于
+    /// 显式调用触发的主动外连；响应只回显节点名，地址绝不离开内核。
+    /// 结果仅作观测，不写入健康表（`url-test` 仍由经代理的 HTTP 探测驱动）。
+    async fn probe_nodes(&self, params: Value) -> Result<Value, IpcError> {
+        let params: ProbeNodesParams =
+            serde_json::from_value(object_params(params)).map_err(|error| IpcError::Remote {
+                code: ERR_INVALID_PARAMS.to_owned(),
+                message: error.to_string(),
+            })?;
+        if params.timeout_ms == 0 || params.timeout_ms > MAX_PROBE_TIMEOUT_MS {
+            return Err(IpcError::Remote {
+                code: ERR_INVALID_PARAMS.to_owned(),
+                message: format!("timeout_ms must be 1..={MAX_PROBE_TIMEOUT_MS}"),
+            });
+        }
+
+        let deadline = Duration::from_millis(params.timeout_ms);
+        let mut results: Vec<NodeProbeOutcome> =
+            join_all(self.context.router().probe_targets().into_iter().map(
+                |(name, address)| async move {
+                    let started = Instant::now();
+                    let outcome =
+                        tokio::time::timeout(deadline, TcpStream::connect(address.as_str())).await;
+                    let (reachable, rtt_ms, error_code) = match outcome {
+                        Ok(Ok(stream)) => {
+                            drop(stream);
+                            (true, Some(started.elapsed().as_secs_f64() * 1000.0), None)
+                        }
+                        Ok(Err(_)) => (false, None, Some("connect_failed".to_owned())),
+                        Err(_) => (false, None, Some("timeout".to_owned())),
+                    };
+                    tracing::info!(
+                        node = %name,
+                        reachable,
+                        rtt_ms = ?rtt_ms,
+                        error_code = ?error_code,
+                        "node tcp probe"
+                    );
+                    NodeProbeOutcome {
+                        name,
+                        reachable,
+                        rtt_ms,
+                        error_code,
+                    }
+                },
+            ))
+            .await;
+        results.sort_by(|left, right| left.name.cmp(&right.name));
+
+        match self.probe_cache.lock() {
+            Ok(mut cache) => {
+                cache.clear();
+                cache.extend(
+                    results
+                        .iter()
+                        .map(|outcome| (outcome.name.clone(), outcome.clone())),
+                );
+            }
+            Err(error) => tracing::warn!(%error, "probe cache poisoned"),
+        }
+        serde_json::to_value(ProbeNodesResult { results }).map_err(|error| IpcError::Remote {
+            code: "serialize_failed".to_owned(),
+            message: error.to_string(),
+        })
+    }
+
+    /// 手动锁定策略组成员，或恢复自动策略。
+    fn select_node(&self, params: Value) -> Result<Value, IpcError> {
+        let params: SelectNodeParams =
+            serde_json::from_value(params).map_err(|error| IpcError::Remote {
+                code: ERR_INVALID_PARAMS.to_owned(),
+                message: error.to_string(),
+            })?;
+        let router = self.context.router();
+        if let Err(error) = router.set_selection(&params.group, params.node.as_deref()) {
+            let code = match error {
+                SelectionError::UnknownGroup => ERR_UNKNOWN_GROUP,
+                SelectionError::UnknownNode => ERR_UNKNOWN_NODE,
+                SelectionError::Poisoned => "handler_error",
+            };
+            return Err(IpcError::Remote {
+                code: code.to_owned(),
+                message: format!("select_node rejected: {error:?}"),
+            });
+        }
+        let view = router
+            .node_snapshot()
+            .groups
+            .into_iter()
+            .find(|group| group.name == params.group)
+            .ok_or_else(|| IpcError::Remote {
+                code: ERR_UNKNOWN_GROUP.to_owned(),
+                message: "group vanished after selection".to_owned(),
+            })?;
+        tracing::info!(
+            group = %params.group,
+            mode = ?view.mode,
+            selected = %view.selected,
+            "node selection changed"
+        );
+        serde_json::to_value(SelectNodeResult {
+            group: params.group,
+            mode: view.mode,
+            selected: view.selected,
+        })
+        .map_err(|error| IpcError::Remote {
+            code: "serialize_failed".to_owned(),
+            message: error.to_string(),
+        })
+    }
+
     /// 对指定 `host:port` 做 TCP 连接延迟探测。
     ///
     /// 当前仅允许回环目标，避免 IPC 成为任意内网探测入口；C1 后续里程碑会
@@ -145,6 +285,11 @@ impl KernelHandler {
     }
 }
 
+/// 无参方法允许调用方省略 `params`（`Value::Null`）。
+fn object_params(params: Value) -> Value {
+    if params.is_null() { json!({}) } else { params }
+}
+
 /// 事件发出时刻（Unix 微秒），供控制面测量端到端延迟。
 fn now_us() -> u64 {
     std::time::SystemTime::now()
@@ -174,6 +319,9 @@ impl Handler for KernelHandler {
             METHOD_RELOAD => self.reload().await,
             METHOD_METRICS => Ok(self.metrics_body()),
             METHOD_NODE_PROBE => self.node_probe(params).await,
+            METHOD_NODES => self.nodes_body(),
+            METHOD_PROBE_NODES => self.probe_nodes(params).await,
+            METHOD_SELECT_NODE => self.select_node(params),
             other => Err(IpcError::Remote {
                 code: ERR_UNKNOWN_METHOD.to_owned(),
                 message: format!("unknown method: {other}"),

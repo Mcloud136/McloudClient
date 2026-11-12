@@ -1,7 +1,8 @@
 //! 后台 IPC 任务：独立的 tokio 线程持有到内核的单连接。
 //!
-//! 职责：连接（指数退避）→ 1 Hz 轮询 `metrics` → 转发内核事件 → 执行
-//! UI 发来的 `node_probe` 命令。状态变化时调用 `egui::Context::request_repaint`
+//! 职责：连接（指数退避）→ 1 Hz 轮询 `metrics` / `nodes` → 转发内核事件 →
+//! 执行 UI 发来的 `node_probe` / `probe_nodes` / `select_node` 命令。
+//! 状态变化时调用 `egui::Context::request_repaint`
 //! 唤醒 UI 线程按需重绘（事件驱动，无空转渲染）。
 //!
 //! 退出：UI 关闭窗口时 `TaskHandle` 落盘 Drop（或显式 `stop()`），任务在
@@ -22,7 +23,9 @@ use client_sidecar::IpcError;
 use client_sidecar::IpcTransport;
 #[cfg(windows)]
 use client_sidecar::contract::{
-    METHOD_METRICS, METHOD_NODE_PROBE, Metrics, NodeProbeParams, NodeProbeResult,
+    METHOD_METRICS, METHOD_NODE_PROBE, METHOD_NODES, METHOD_PROBE_NODES, METHOD_SELECT_NODE,
+    Metrics, NodeProbeParams, NodeProbeResult, NodesSnapshot, ProbeNodesParams, ProbeNodesResult,
+    SelectNodeParams,
 };
 #[cfg(windows)]
 use client_sidecar::ipc::pipe::PipeClient;
@@ -174,11 +177,28 @@ async fn session(
             command = rx.recv() => {
                 match command {
                     Some(Command::Probe { address, timeout_ms }) => {
+                        tracing::info!(address = %address, "ipc probe command received");
                         if let Err(error) = run_probe(client, state, ctx, &address, timeout_ms).await {
                             if is_connection_error(&error) {
                                 return error.to_string();
                             }
                             tracing::warn!(%error, "probe command failed");
+                        }
+                    }
+                    Some(Command::ProbeNodes { timeout_ms }) => {
+                        if let Err(error) = run_probe_nodes(client, state, ctx, timeout_ms).await {
+                            if is_connection_error(&error) {
+                                return error.to_string();
+                            }
+                            tracing::warn!(%error, "probe_nodes command failed");
+                        }
+                    }
+                    Some(Command::SelectNode { group, node }) => {
+                        if let Err(error) = run_select(client, state, ctx, &group, node).await {
+                            if is_connection_error(&error) {
+                                return error.to_string();
+                            }
+                            tracing::warn!(%error, "select_node command failed");
                         }
                     }
                     None => return "command channel closed".to_owned(),
@@ -190,6 +210,12 @@ async fn session(
                         return error.to_string();
                     }
                     tracing::warn!(%error, "metrics poll failed");
+                }
+                if let Err(error) = poll_nodes(client, state).await {
+                    if is_connection_error(&error) {
+                        return error.to_string();
+                    }
+                    tracing::warn!(%error, "nodes poll failed");
                 }
                 ctx.request_repaint();
             }
@@ -225,6 +251,70 @@ async fn poll_metrics(client: &PipeClient, state: &Arc<SharedState>) -> Result<(
     Ok(())
 }
 
+/// 轮询一轮 `nodes`（策略组与节点状态）；解析失败只记日志，不断连接。
+#[cfg(windows)]
+async fn poll_nodes(client: &PipeClient, state: &Arc<SharedState>) -> Result<(), IpcError> {
+    let value = client.request(METHOD_NODES, Value::Null).await?;
+    match serde_json::from_value::<NodesSnapshot>(value) {
+        Ok(nodes) => state.update(|s| s.apply_nodes(nodes)),
+        Err(error) => tracing::warn!(%error, "nodes parse failed"),
+    }
+    Ok(())
+}
+
+/// 对所有已登记节点测速；完成后立即刷新一次 `nodes` 快照。
+#[cfg(windows)]
+async fn run_probe_nodes(
+    client: &PipeClient,
+    state: &Arc<SharedState>,
+    ctx: &eframe::egui::Context,
+    timeout_ms: u64,
+) -> Result<(), IpcError> {
+    let params = serde_json::to_value(ProbeNodesParams {
+        timeout_ms: timeout_ms.min(REQUEST_TIMEOUT_MS),
+    })
+    .map_err(|_| IpcError::Unexpected)?;
+    let value = client.request(METHOD_PROBE_NODES, params).await?;
+    let result = serde_json::from_value::<ProbeNodesResult>(value).unwrap_or_default();
+    let reachable = result.results.iter().filter(|item| item.reachable).count();
+    let summary = format!("{reachable}/{} reachable", result.results.len());
+    tracing::info!(
+        nodes = result.results.len(),
+        reachable,
+        summary = %summary,
+        "node probe batch completed"
+    );
+    state.update(|s| s.apply_probe_summary(summary));
+    ctx.request_repaint();
+    poll_nodes(client, state).await
+}
+
+/// 锁定 / 解锁策略组成员；业务拒绝作为可见摘要，不当作连接故障。
+#[cfg(windows)]
+async fn run_select(
+    client: &PipeClient,
+    state: &Arc<SharedState>,
+    ctx: &eframe::egui::Context,
+    group: &str,
+    node: Option<String>,
+) -> Result<(), IpcError> {
+    let params = serde_json::to_value(SelectNodeParams {
+        group: group.to_owned(),
+        node,
+    })
+    .map_err(|_| IpcError::Unexpected)?;
+    match client.request(METHOD_SELECT_NODE, params).await {
+        Ok(_) => {}
+        Err(IpcError::Remote { code, message }) => {
+            tracing::warn!(code = %code, %message, "select rejected by kernel");
+            state.update(|s| s.apply_probe_summary(format!("select rejected: {code}")));
+        }
+        Err(other) => return Err(other),
+    }
+    ctx.request_repaint();
+    poll_nodes(client, state).await
+}
+
 /// 执行一次探测；内核拒绝（参数/目标越界）也作为结果呈现给 UI。
 #[cfg(windows)]
 async fn run_probe(
@@ -253,6 +343,12 @@ async fn run_probe(
         NodeProbeResult::unreachable(address.to_owned(), "serialize_failed")
     });
 
+    tracing::info!(
+        address = %result.address,
+        reachable = result.reachable,
+        rtt_ms = ?result.rtt_ms,
+        "node probe completed"
+    );
     state.update(|s| s.push_probe(result));
     ctx.request_repaint();
     Ok(())
@@ -328,6 +424,9 @@ mod tests {
                         error_code: None,
                     };
                     serde_json::to_value(result).map_err(|_| IpcError::Unexpected)
+                }
+                METHOD_NODES => {
+                    serde_json::to_value(NodesSnapshot::default()).map_err(|_| IpcError::Unexpected)
                 }
                 _ => Ok(Value::Null),
             }

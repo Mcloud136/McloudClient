@@ -1,12 +1,14 @@
 //! 只读状态面板（C1 首里程碑）。
 //!
 //! 展示：连接状态、内核指标（uptime/规则/连接/观测字节）、事件流、
-//! `node_probe` 结果。所有数据来自后台 IPC 任务写入的 [`SharedState`]，
-//! UI 不直接发起 IPC 请求；探测经命令通道交给后台任务执行。
+//! `node_probe` 结果，以及策略组 / 节点测速与负载均衡状态。
+//! 所有数据来自后台 IPC 任务写入的 [`SharedState`]，UI 不直接发起 IPC 请求；
+//! 探测与切换经命令通道交给后台任务执行。
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use client_sidecar::contract::GroupMode;
 use eframe::egui::{self, CentralPanel, Grid, Layout, Panel, RichText, ScrollArea, TextEdit};
 use tokio::sync::mpsc;
 
@@ -52,6 +54,7 @@ impl PanelApp {
         if address.is_empty() {
             return;
         }
+        tracing::info!(address = %address, "gui probe command issued");
         if self.commands.send(Command::probe(address.clone())).is_err() {
             self.state.update(|s| {
                 s.push_probe(client_sidecar::contract::NodeProbeResult::unreachable(
@@ -148,6 +151,89 @@ impl PanelApp {
         }
     }
 
+    /// 策略组与节点状态。新增区块置于末尾，避免挤压上方既有区块的可见性。
+    fn nodes_section(&self, ui: &mut egui::Ui, snapshot: &State) {
+        section_heading(ui, "NODES & BALANCE");
+        ui.horizontal(|ui| {
+            if ui
+                .button("Probe all  (Ctrl+T)")
+                .on_hover_text("TCP connect RTT for every configured node")
+                .clicked()
+            {
+                let _ = self.commands.send(Command::probe_nodes());
+            }
+            if let Some(summary) = &snapshot.last_probe {
+                ui.label(RichText::new(summary).color(theme::OK).small());
+            }
+        });
+
+        let Some(nodes) = &snapshot.nodes else {
+            ui.label(
+                RichText::new("waiting for node snapshot…")
+                    .color(theme::DIM)
+                    .italics(),
+            );
+            return;
+        };
+        if nodes.nodes.is_empty() && nodes.groups.is_empty() {
+            ui.label(RichText::new("no nodes configured").color(theme::DIM));
+            return;
+        }
+
+        for node in &nodes.nodes {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&node.name).strong());
+                let health = node
+                    .health_ms
+                    .map_or("health -".to_owned(), |ms| format!("health {ms} ms"));
+                ui.label(RichText::new(health).color(theme::DIM).small());
+                let tcp = match (node.tcp_ok, node.tcp_rtt_ms) {
+                    (Some(true), Some(ms)) => {
+                        RichText::new(format!("tcp {ms:.2} ms")).color(theme::OK)
+                    }
+                    (Some(false), _) => RichText::new("tcp fail").color(theme::ERR),
+                    _ => RichText::new("tcp -").color(theme::DIM),
+                };
+                ui.label(tcp.small());
+            });
+        }
+
+        for group in &nodes.groups {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{}  [{}]", group.name, group.kind))
+                        .strong()
+                        .color(theme::ACCENT),
+                );
+                let mode = match group.mode {
+                    GroupMode::Auto => "auto",
+                    GroupMode::Manual => "manual",
+                };
+                ui.label(
+                    RichText::new(format!("{mode} -> {}", group.selected))
+                        .color(theme::DIM)
+                        .small(),
+                );
+                if group.mode == GroupMode::Manual && ui.small_button("Auto").clicked() {
+                    let _ = self.commands.send(Command::auto(group.name.clone()));
+                }
+            });
+            for member in &group.members {
+                ui.horizontal(|ui| {
+                    let marker = if *member == group.selected { ">" } else { " " };
+                    ui.label(RichText::new(marker).color(theme::ACCENT));
+                    ui.label(member);
+                    if ui.small_button("use").clicked() {
+                        let _ = self
+                            .commands
+                            .send(Command::select(group.name.clone(), member.clone()));
+                    }
+                });
+            }
+        }
+    }
+
     fn events_section(&self, ui: &mut egui::Ui, snapshot: &State) {
         section_heading(ui, "EVENTS");
         let events = snapshot.events_recent_first();
@@ -174,6 +260,9 @@ impl eframe::App for PanelApp {
         let ctx = ui.ctx().clone();
         if ctx.input(|i| i.key_pressed(egui::Key::P) && i.modifiers.ctrl) {
             self.send_probe();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::T) && i.modifiers.ctrl) {
+            let _ = self.commands.send(Command::probe_nodes());
         }
         let snapshot = self.state.snapshot();
 
@@ -234,6 +323,7 @@ impl eframe::App for PanelApp {
                 self.traffic_section(ui, &snapshot);
                 self.probe_section(ui, &snapshot);
                 self.events_section(ui, &snapshot);
+                self.nodes_section(ui, &snapshot);
             });
         });
 

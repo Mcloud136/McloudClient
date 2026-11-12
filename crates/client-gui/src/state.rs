@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use client_sidecar::contract::{DEFAULT_PROBE_TIMEOUT_MS, Metrics, NodeProbeResult};
+use client_sidecar::contract::{DEFAULT_PROBE_TIMEOUT_MS, Metrics, NodeProbeResult, NodesSnapshot};
 use serde_json::Value;
 
 /// 事件环上限（超出丢弃最旧）。
@@ -31,6 +31,18 @@ pub enum Command {
         #[cfg_attr(not(windows), allow(dead_code))]
         timeout_ms: u64,
     },
+    /// 对所有已登记节点执行 `probe_nodes`。
+    ProbeNodes {
+        #[cfg_attr(not(windows), allow(dead_code))]
+        timeout_ms: u64,
+    },
+    /// 锁定策略组成员；`node = None` 表示恢复自动策略。
+    SelectNode {
+        #[cfg_attr(not(windows), allow(dead_code))]
+        group: String,
+        #[cfg_attr(not(windows), allow(dead_code))]
+        node: Option<String>,
+    },
 }
 
 impl Command {
@@ -40,6 +52,32 @@ impl Command {
         Self::Probe {
             address: address.into(),
             timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
+        }
+    }
+
+    /// 构造全节点测速命令。
+    #[must_use]
+    pub fn probe_nodes() -> Self {
+        Self::ProbeNodes {
+            timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
+        }
+    }
+
+    /// 构造手动锁定命令。
+    #[must_use]
+    pub fn select(group: impl Into<String>, node: impl Into<String>) -> Self {
+        Self::SelectNode {
+            group: group.into(),
+            node: Some(node.into()),
+        }
+    }
+
+    /// 构造恢复自动策略命令。
+    #[must_use]
+    pub fn auto(group: impl Into<String>) -> Self {
+        Self::SelectNode {
+            group: group.into(),
+            node: None,
         }
     }
 }
@@ -118,6 +156,10 @@ impl From<NodeProbeResult> for ProbeEntry {
 pub struct State {
     pub link: LinkInfo,
     pub kernel: Option<Metrics>,
+    /// 策略组与节点的可观测快照（1 Hz 轮询）。
+    pub nodes: Option<NodesSnapshot>,
+    /// 最近一次全节点测速摘要，如 `3/3 reachable`。
+    pub last_probe: Option<String>,
     events: VecDeque<GuiEvent>,
     probes: VecDeque<ProbeEntry>,
 }
@@ -152,6 +194,18 @@ impl State {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn apply_metrics(&mut self, metrics: Metrics) {
         self.kernel = Some(metrics);
+    }
+
+    /// 应用一轮 `nodes` 轮询结果。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn apply_nodes(&mut self, nodes: NodesSnapshot) {
+        self.nodes = Some(nodes);
+    }
+
+    /// 记录一次全节点测速摘要。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn apply_probe_summary(&mut self, summary: String) {
+        self.last_probe = Some(summary);
     }
 
     /// 应用内核推送的事件（如 reload 的 applied/rejected）。
@@ -407,8 +461,57 @@ mod tests {
         let Command::Probe {
             address,
             timeout_ms,
-        } = Command::probe("localhost:80");
+        } = Command::probe("localhost:80")
+        else {
+            panic!("expected Probe");
+        };
         assert_eq!(address, "localhost:80");
         assert_eq!(timeout_ms, DEFAULT_PROBE_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn node_commands_carry_defaults_and_auto_marker() {
+        let Command::ProbeNodes { timeout_ms } = Command::probe_nodes() else {
+            panic!("expected ProbeNodes");
+        };
+        assert_eq!(timeout_ms, DEFAULT_PROBE_TIMEOUT_MS);
+
+        let Command::SelectNode { group, node } = Command::select("auto", "node-b") else {
+            panic!("expected SelectNode");
+        };
+        assert_eq!(group, "auto");
+        assert_eq!(node.as_deref(), Some("node-b"));
+
+        let Command::SelectNode { node, .. } = Command::auto("auto") else {
+            panic!("expected SelectNode");
+        };
+        assert_eq!(node, None);
+    }
+
+    #[test]
+    fn nodes_snapshot_and_probe_summary_applied() {
+        let shared = SharedState::new();
+        let snapshot = NodesSnapshot {
+            groups: vec![client_sidecar::contract::NodeGroupView {
+                name: "auto".into(),
+                kind: "url-test".into(),
+                mode: client_sidecar::contract::GroupMode::Auto,
+                selected: "node-a".into(),
+                members: vec!["node-a".into(), "node-b".into()],
+            }],
+            nodes: vec![client_sidecar::contract::NodeView {
+                name: "node-a".into(),
+                tcp_ok: Some(true),
+                tcp_rtt_ms: Some(0.42),
+                ..Default::default()
+            }],
+        };
+        shared.update(|state| {
+            state.apply_nodes(snapshot.clone());
+            state.apply_probe_summary("2/2 reachable".into());
+        });
+        let view = shared.snapshot();
+        assert_eq!(view.nodes, Some(snapshot));
+        assert_eq!(view.last_probe.as_deref(), Some("2/2 reachable"));
     }
 }
