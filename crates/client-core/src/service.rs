@@ -13,7 +13,7 @@ mod imp {
     #![allow(unsafe_code)]
 
     use std::ffi::OsString;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use anyhow::{Context, Result};
@@ -25,7 +25,7 @@ mod imp {
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::{define_windows_service, service_dispatcher};
 
-    use crate::{app, config::Config};
+    use crate::{app, config::Config, logging::WorkerGuard};
 
     /// 服务名；`sc.exe` 与 SCM 使用同一标识。
     pub const SERVICE_NAME: &str = "McloudCore";
@@ -36,16 +36,24 @@ mod imp {
     /// SCM 传给 `ServiceMain` 的 `arguments` 只有服务名，binPath 中的参数
     /// 在进程命令行里，因此不能靠回调参数重建配置。
     static CONFIG: OnceLock<Config> = OnceLock::new();
+    /// 日志 guard 由 `main` 移交到服务线程：SCM 见到 Stopped 后可能立即回收
+    /// 进程，`main` 栈上的 drop 未必执行，必须在报告 Stopped 前显式 flush。
+    static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
 
     define_windows_service!(ffi_service_main, service_main);
 
     /// 进入服务分发器，阻塞直到服务停止。
     ///
+    /// `log_guard` 移交到服务线程持有，退出前显式 flush（见 `LOG_GUARD`）。
+    ///
     /// # Errors
     ///
     /// 进程不是由 SCM 启动时返回错误（例如在控制台直接运行 `--service`）。
-    pub fn run(config: Config) -> Result<()> {
+    pub fn run(config: Config, log_guard: WorkerGuard) -> Result<()> {
         let _ = CONFIG.set(config);
+        *LOG_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(log_guard);
         service_dispatcher::start(SERVICE_NAME, ffi_service_main)
             .map_err(|error| anyhow::anyhow!("service dispatcher: {error}"))
     }
@@ -53,6 +61,12 @@ mod imp {
     fn service_main(arguments: Vec<OsString>) {
         if let Err(error) = run_service(arguments) {
             tracing::error!(%error, "service exited with error");
+            drop(
+                LOG_GUARD
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
         }
     }
 
@@ -85,6 +99,17 @@ mod imp {
             .build()
             .context("build tokio runtime")?;
         let result = runtime.block_on(app::run(config, rx));
+        if let Err(error) = &result {
+            tracing::error!(%error, "service exited with error");
+        }
+        // 先 flush 再报告 Stopped：SCM 见到 Stopped 后可能立即回收进程，
+        // 异步缓冲里的日志尾（含上面的错误行）否则会丢失。
+        drop(
+            LOG_GUARD
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
 
         let exit_code = if result.is_ok() {
             ServiceExitCode::Win32(0)
@@ -103,7 +128,7 @@ mod imp {
             })
             .map_err(|error| anyhow::anyhow!("report stopped: {error}"))?;
 
-        result
+        Ok(())
     }
 
     fn handle_control(control: ServiceControl) -> ServiceControlHandlerResult {
@@ -132,6 +157,9 @@ pub const SERVICE_NAME: &str = "McloudCore";
 /// # Errors
 ///
 /// 始终返回「不支持」错误。
-pub fn run(_config: crate::config::Config) -> anyhow::Result<()> {
+pub fn run(
+    _config: crate::config::Config,
+    _log_guard: crate::logging::WorkerGuard,
+) -> anyhow::Result<()> {
     anyhow::bail!("--service is only supported on Windows")
 }

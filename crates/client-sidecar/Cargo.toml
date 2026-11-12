@@ -19,6 +19,7 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process", "signal"] }
 zeroize = "1"
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 # keyring 3 + 仅 windows-native：避免 4.x v1 feature 捆绑 Linux zbus 后端

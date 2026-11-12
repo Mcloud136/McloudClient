@@ -14,6 +14,11 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let panel = MockPanel::start_on(port).await?;
+    if let Some(i) = std::env::args().position(|a| a == "--installer")
+        && let Some(path) = std::env::args().nth(i + 1)
+    {
+        panel.set_installer(std::path::Path::new(&path))?;
+    }
     println!("mock panel listening at {}", panel.base_url());
     println!("login: any email with @ + password 12345678");
     loop {

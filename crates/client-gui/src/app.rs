@@ -54,6 +54,7 @@ pub struct GuiConfig {
     pub site: String,
     pub probe_default: String,
     pub proxy_target: String,
+    pub update_manifest: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -132,6 +133,10 @@ pub enum Message {
     ChangeDone(Result<(), PanelError>),
     SettingsDone(Result<(), PanelError>),
     ToggleProxy,
+    CheckUpdate,
+    UpdateChecked(Result<Option<crate::update::UpdateInfo>, String>),
+    ApplyUpdate,
+    UpdateReady(Result<std::path::PathBuf, String>),
     WindowClosed,
     TrayActivate,
     TrayMenu(String),
@@ -167,6 +172,10 @@ struct ViewModel {
     events: Vec<crate::state::EventView>,
     last_refresh: Instant,
     last_check: Instant,
+    update_manifest: String,
+    update_info: Option<crate::update::UpdateInfo>,
+    update_status: String,
+    update_check_requested: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -255,6 +264,10 @@ struct TrayApp {
     proxy: SystemProxy,
     window_visible: bool,
     exiting: bool,
+    update_manifest: String,
+    update_info: Option<crate::update::UpdateInfo>,
+    update_status: String,
+    update_check_requested: bool,
 }
 
 impl Application for TrayApp {
@@ -288,6 +301,10 @@ impl Application for TrayApp {
             proxy: SystemProxy::new(input.proxy_target.clone()),
             window_visible: true,
             exiting: false,
+            update_manifest: input.update_manifest.clone(),
+            update_info: None,
+            update_status: String::new(),
+            update_check_requested: false,
         };
         context.show_window("main");
         app
@@ -308,6 +325,12 @@ impl Application for TrayApp {
                 "exit" => {
                     self.exiting = true;
                     context.exit();
+                }
+                "update" => {
+                    self.window_visible = true;
+                    context.show_window("main");
+                    self.update_status = "正在检查更新…".to_owned();
+                    self.update_check_requested = true;
                 }
                 _ => {
                     self.window_visible = true;
@@ -517,6 +540,31 @@ impl Application for TrayApp {
                 self.error = Some("登录已失效，请重新登录".to_owned());
             }
             Message::SettingsDone(Err(error)) => self.error = Some(error.to_string()),
+            Message::UpdateChecked(Ok(info)) => {
+                self.update_check_requested = false;
+                self.update_info = info;
+                self.update_status = if self.update_info.is_some() {
+                    String::new()
+                } else {
+                    "已是最新版本".to_owned()
+                };
+            }
+            Message::UpdateChecked(Err(error)) => {
+                self.update_check_requested = false;
+                self.update_status = format!("检查更新失败：{error}");
+            }
+            Message::UpdateReady(Ok(path)) => {
+                tracing::info!(path = %path.display(), "launching installer");
+                if let Err(error) = crate::update::launch_installer(&path) {
+                    self.update_status = format!("启动安装器失败：{error}");
+                } else {
+                    self.exiting = true;
+                    context.exit();
+                }
+            }
+            Message::UpdateReady(Err(error)) => {
+                self.update_status = format!("更新包校验失败：{error}");
+            }
             Message::ToggleProxy => {
                 let result = if self.proxy.is_taken() {
                     self.proxy.release()
@@ -549,6 +597,8 @@ impl Application for TrayApp {
             | Message::CouponCheck
             | Message::PlaceOrder
             | Message::CancelOrder(_)
+            | Message::CheckUpdate
+            | Message::ApplyUpdate
             | Message::ChangePassword => {}
         }
     }
@@ -578,6 +628,7 @@ impl Application for TrayApp {
                 .menu(Menu::new(
                     [
                         MenuItem::item("open", "打开主窗口"),
+                        MenuItem::item("update", "检查更新"),
                         MenuItem::separator("sep"),
                         MenuItem::item("exit", "退出"),
                     ],
@@ -725,6 +776,10 @@ impl TrayApp {
                 .collect(),
             last_refresh: self.last_refresh,
             last_check: self.last_check,
+            update_manifest: self.update_manifest.clone(),
+            update_info: self.update_info.clone(),
+            update_status: self.update_status.clone(),
+            update_check_requested: self.update_check_requested,
         }
     }
 }
@@ -749,6 +804,13 @@ impl Component for MainWindow {
             std::thread::sleep(TICK);
             Message::Tick
         });
+        if input.vm.update_check_requested {
+            let url = input.vm.update_manifest.clone();
+            context.spawn_background(move |_| {
+                let result = block_on_panel(async { crate::update::check(&url).await });
+                Message::UpdateChecked(result.map_err(|e| e.to_string()))
+            });
+        }
         let panel = handles().panel.clone();
         context.spawn_background(move |_| {
             let result = block_on_panel(async { panel.guest_config().await });
@@ -974,6 +1036,30 @@ impl Component for MainWindow {
                         });
                         Message::ChangeDone(result)
                     });
+                }
+            }
+            Message::CheckUpdate => {
+                let url = input.vm.update_manifest.clone();
+                context.spawn_background(move |_| {
+                    let result = block_on_panel(async { crate::update::check(&url).await });
+                    Message::UpdateChecked(result.map_err(|e| e.to_string()))
+                });
+            }
+            Message::ApplyUpdate => {
+                if let Some(info) = input.vm.update_info.clone() {
+                    tracing::info!(version = %info.version, "update download start");
+                    context.spawn_background(move |_| {
+                        let result = block_on_panel(async { crate::update::download(&info).await });
+                        match &result {
+                            Ok(path) => {
+                                tracing::info!(path = %path.display(), "update download verified")
+                            }
+                            Err(error) => tracing::warn!(%error, "update download failed"),
+                        }
+                        Message::UpdateReady(result.map_err(|e| e.to_string()))
+                    });
+                } else {
+                    tracing::warn!("apply update without info");
                 }
             }
             Message::ToggleRemindExpire(v) => {
@@ -1220,6 +1306,28 @@ fn login_view(vm: &ViewModel, context: &mut ViewContext<MainWindow>) -> View {
     }
     if let Some(error) = &vm.error {
         items.push(TextBlock::new().text(error.clone()).font_size(12.0).into());
+    }
+    items.push(
+        Button::new()
+            .on_click(context.message(Message::CheckUpdate))
+            .content("检查更新")
+            .into(),
+    );
+    if let Some(info) = &vm.update_info {
+        items.push(
+            Button::new()
+                .on_click(context.message(Message::ApplyUpdate))
+                .content(format!("安装更新 v{}", info.version))
+                .into(),
+        );
+    }
+    if !vm.update_status.is_empty() {
+        items.push(
+            TextBlock::new()
+                .text(vm.update_status.clone())
+                .font_size(12.0)
+                .into(),
+        );
     }
     StackPanel::new()
         .spacing(12.0)
@@ -1727,6 +1835,28 @@ fn account_view(vm: &ViewModel, context: &mut ViewContext<MainWindow>) -> View {
             .content("登出并清除已保存凭据")
             .into(),
     );
+    items.push(
+        Button::new()
+            .on_click(context.message(Message::CheckUpdate))
+            .content("检查更新")
+            .into(),
+    );
+    if let Some(info) = &vm.update_info {
+        items.push(
+            Button::new()
+                .on_click(context.message(Message::ApplyUpdate))
+                .content(format!("安装更新 v{}", info.version))
+                .into(),
+        );
+    }
+    if !vm.update_status.is_empty() {
+        items.push(
+            TextBlock::new()
+                .text(vm.update_status.clone())
+                .font_size(12.0)
+                .into(),
+        );
+    }
     StackPanel::new()
         .spacing(12.0)
         .margin(24.0)

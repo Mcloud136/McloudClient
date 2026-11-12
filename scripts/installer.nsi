@@ -23,17 +23,23 @@ Unicode true
 
 Section "Install"
   ReadEnvStr $R9 PROGRAMDATA
+  ; 更新场景：先停服务与旧 GUI，避免覆盖被占用文件。
+  nsExec::ExecToLog 'sc.exe stop McloudCore'
+  nsExec::ExecToLog 'taskkill /IM client-gui.exe /F'
+  ; 兜底释放数据面端口：非服务形态的内核（开发 CLI）或卡死的服务不会响应 sc stop。
+  nsExec::ExecToLog 'taskkill /IM client-core.exe /F'
+  Sleep 1500
   SetOutPath "$INSTDIR"
   File "..\target\release\client-core.exe"
   File "..\target\release\client-gui.exe"
   File "..\target\release\sidecar.exe"
   File "..\LICENSE"
-  SetOutPath "$INSTDIRssets"
-  File "..\crates\client-guissets\icon.ico"
+  SetOutPath "$INSTDIR\assets"
+  File "..\crates\client-gui\assets\icon.ico"
   SetOutPath "$INSTDIR"
 
   ; Windows App Runtime（reactor GUI 依赖）检查：缺失则提示并中止。
-  nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-AppxPackage Microsoft.WindowsAppRuntime.1.* ) { exit 0 } else { exit 1 }"'
+  nsExec::ExecToStack '$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -Command "if (Get-AppxPackage Microsoft.WindowsAppRuntime.1.* ) { exit 0 } else { exit 1 }"'
   Pop $0
   Pop $1
   ${If} $0 != 0
@@ -60,7 +66,6 @@ Section "Install"
   nsExec::ExecToLog 'sc.exe create McloudCore binPath= "\"$INSTDIR\client-core.exe\" --service --profile \"$R9\McloudClient\snapshots\live.json\" --ipc-pipe \\.\pipe\mcloud-client --log-dir \"$R9\McloudClient\logs\"" start= auto DisplayName= "McloudClient Core"'
   nsExec::ExecToLog 'sc.exe description McloudCore "McloudClient data plane (VLESS/WS/TLS/mlkem)"'
   nsExec::ExecToLog 'sc.exe failure McloudCore reset= 86400 actions= restart/5000/restart/10000/restart/30000'
-  nsExec::ExecToLog 'sc.exe start McloudCore'
 
   CreateDirectory "$SMPROGRAMS\McloudClient"
   CreateShortcut "$SMPROGRAMS\McloudClient\McloudClient.lnk" "$INSTDIR\client-gui.exe" '--pipe \\.\pipe\mcloud-client'
@@ -72,6 +77,8 @@ Section "Install"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "DisplayVersion" "0.1.0"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "Publisher" "Mcloud136"
+  ; 服务由拉起的 GUI 补启动（长生命周期进程，避免安装器退出竞态）。
+  Exec '"$INSTDIR\client-gui.exe" --pipe \\.\pipe\mcloud-client'
 SectionEnd
 
 Section "Uninstall"
@@ -86,8 +93,8 @@ Section "Uninstall"
   Delete "$INSTDIR\client-gui.exe"
   Delete "$INSTDIR\sidecar.exe"
   Delete "$INSTDIR\LICENSE"
-  Delete "$INSTDIRssets\icon.ico"
-  RMDir "$INSTDIRssets"
+  Delete "$INSTDIR\assets\icon.ico"
+  RMDir "$INSTDIR\assets"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient"

@@ -25,6 +25,8 @@ mod panel;
 mod proxy;
 #[cfg(windows)]
 mod shop;
+#[cfg(windows)]
+mod update;
 
 #[derive(Debug, Parser)]
 #[command(name = "client-gui", version, about = "McloudClient 主界面")]
@@ -56,6 +58,13 @@ struct Args {
     /// 系统代理接管目标（内核入站地址）。
     #[arg(long, default_value = "127.0.0.1:1080")]
     proxy_target: String,
+
+    /// 更新 manifest URL（实机回归可指向 mock 面板）。
+    #[arg(
+        long,
+        default_value = "https://raw.githubusercontent.com/Mcloud136/McloudClient/main/docs/update-manifest.json"
+    )]
+    update_manifest: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,6 +76,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         use std::sync::Arc;
 
+        // 安装/更新场景：GUI 拉起后补启动内核服务（服务可能处于停止态）。
+        let _ = std::process::Command::new("sc.exe")
+            .args(["start", "McloudCore"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
         let state = state::SharedState::new();
         let probe_default = args
             .default_probe
@@ -95,6 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             site: args.site,
             probe_default,
             proxy_target: args.proxy_target,
+            update_manifest: args.update_manifest,
         };
         app::run(handles, config)?;
         tracing::info!("gui exited");

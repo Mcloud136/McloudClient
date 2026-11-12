@@ -17,10 +17,10 @@ use client_core::{app, config::Config, logging, service};
 fn main() -> Result<()> {
     let config = Config::parse();
     // 日志必须在任何业务动作前就绪：服务模式下 stdout 不可见，文件是唯一证据。
-    let _log_guard = logging::init(config.log_dir.clone())?;
+    let log_guard = logging::init(config.log_dir.clone())?;
 
     if config.service {
-        return service::run(config);
+        return service::run(config, log_guard);
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

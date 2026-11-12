@@ -27,6 +27,8 @@ struct State {
     sub_version: u32,
     sub_token: String,
     next_trade: u32,
+    installer: Option<Vec<u8>>,
+    installer_sha: String,
     password: String,
     remind_expire: bool,
     remind_traffic: bool,
@@ -88,6 +90,21 @@ impl MockPanel {
         state.orders.insert(trade_no.to_owned(), 3);
     }
 
+    /// 测试控制：设置更新安装器字节（manifest 的 sha256 随之计算）。
+    ///
+    /// # Errors
+    ///
+    /// 读取安装器文件失败时返回错误。
+    pub fn set_installer(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use sha2::{Digest, Sha256};
+        let bytes = std::fs::read(path)?;
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let mut state = self.state.lock().expect("mock state");
+        state.installer = Some(bytes);
+        state.installer_sha = sha;
+        Ok(())
+    }
+
     /// 测试控制：订阅内容版本 +1（模拟面板侧订阅变更）。
     pub fn bump_subscription(&self) {
         let mut state = self.state.lock().expect("mock state");
@@ -142,6 +159,26 @@ async fn handle(mut socket: TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
         .collect();
     let json_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
 
+    if method == "GET" && path == "/update/installer" {
+        let bytes = state.lock().expect("mock state").installer.clone();
+        eprintln!("MOCK REQ {method} {target} -> installer");
+        match bytes {
+            Some(bytes) => {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                );
+                socket.write_all(head.as_bytes()).await?;
+                socket.write_all(&bytes).await?;
+            }
+            None => {
+                let head =
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                socket.write_all(head.as_bytes()).await?;
+            }
+        }
+        return Ok(());
+    }
     let (status, response) = route(&method, &path, &params, &json_body, auth.as_deref(), &state);
     eprintln!("MOCK REQ {method} {target} -> {status}");
     let payload = serde_json::to_vec(&response)?;
@@ -298,6 +335,28 @@ fn route(
                 None => (500, json!({ "message": "Order does not exist" })),
             }
         }
+        ("GET", "/update/manifest") => match &state.installer {
+            Some(_) => (
+                200,
+                json!({
+                    "version": "0.2.0",
+                    "url": format!("http://127.0.0.1:{}/update/installer", state.port),
+                    "sha256": state.installer_sha,
+                }),
+            ),
+            None => (404, json!({ "message": "no installer configured" })),
+        },
+        ("GET", "/update/manifest-bad") => match &state.installer {
+            Some(_) => (
+                200,
+                json!({
+                    "version": "0.2.0",
+                    "url": format!("http://127.0.0.1:{}/update/installer", state.port),
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                }),
+            ),
+            None => (404, json!({ "message": "no installer configured" })),
+        },
         ("POST", "/mock/bump") => {
             state.sub_version += 1;
             (200, json!({ "data": true }))
