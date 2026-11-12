@@ -9,7 +9,6 @@
 //! 非 Windows：编译桩（GUI 仅 Windows，内核/sidecar 跨平台不变）。
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
 use client_sidecar::logging;
@@ -53,6 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(windows)]
     {
+        use std::sync::Arc;
+
         let state = state::SharedState::new();
         let probe_default = args
             .default_probe

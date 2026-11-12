@@ -2,6 +2,10 @@
 //!
 //! 纯数据层，不含 egui 依赖，便于单测；渲染层的快照克隆成本
 //! （≤ 60 条事件 + 10 条探测）在 1 Hz 刷新下可忽略。
+//!
+//! 渲染层仅 Windows（ADR 0005）：Linux 编译桩不消费本层，
+//! 故非 Windows 允许 dead_code（Windows 门禁仍全量检查）。
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

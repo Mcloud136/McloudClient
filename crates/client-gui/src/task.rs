@@ -6,6 +6,10 @@
 //!
 //! 退出：UI 关闭窗口时 `TaskHandle` 落盘 Drop（或显式 `stop()`），任务在
 //! select 的 watch 分支感知后结束；进程退出本身也会回收线程。
+//!
+//! 渲染层仅 Windows（ADR 0005）：Linux 编译桩不消费本层，
+//! 故非 Windows 允许 dead_code（Windows 门禁仍全量检查）。
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use std::sync::Arc;
 
