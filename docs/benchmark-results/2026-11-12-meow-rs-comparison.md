@@ -147,3 +147,20 @@ python s10_compare.py
 4. 更新本报告，形成可复现的发布级基线。
 
 **安全与合规**：官方产物 SHA-256 已校验；所有第三方文件、配置与日志存放于 `D:\wxmuma\_c0d_test\meow-bench\`，**未入库**；本报告不含任何真实节点地址、UUID、加密串或订阅链接。
+
+---
+
+## 8. 2026-11-12 13:57 状态更新（Release 已产出）
+
+本节只更新**前置条件状态**，不修改上文任何实测数值——第 3–5 节的数据仍全部来自 Debug 构建。
+
+此前「本机 Release 构建受阻于 `aws-lc-sys`」的判断**已作废**：真实原因是构建进程被反复中断、且默认 32 jobs 并行度过高；改用显式 `-j 24` 后 `aws_lc_0_47_0_crypto.lib`（7.6 MB）正常生成，`cargo build --release --workspace -j 24` 成功。
+
+| 文件 | 大小 | SHA-256 |
+|---|---|---|
+| `target/release/client-core.exe` | 7.4 MB | `84e49c536f991fd51a7d68dab7b1661121ab10430aa78253cf4fe56e78e354d4` |
+| `target/release/sidecar.exe` | 4.9 MB | `4cd528fe724fda442bee0ea2699bccbeb67a51830de4cb427f6dc097c302ae78` |
+
+- 质量门禁：`cargo fmt --all -- --check`、clippy `-D warnings`、`cargo test --workspace` 全绿（58 tests）。
+- Release 实机冒烟：DIRECT profile 下 SOCKS5 回环转发 4 B / 1 MiB 均 HTTP 200 且字节数一致（`_c0d_test/release_smoke.py`，未入库）。
+- **§7 第 1 项的前半段（产出 Release + pin SHA-256）已具备，但 DIRECT workload 尚未用 Release 重跑**。因此本报告「构建不对等」的边界**依然有效**，仍不支持任何选型判断；须重跑对比后再下性能结论。
