@@ -22,6 +22,8 @@ mod app;
 #[cfg(windows)]
 mod panel;
 #[cfg(windows)]
+mod proxy;
+#[cfg(windows)]
 mod shop;
 
 #[derive(Debug, Parser)]
@@ -50,6 +52,10 @@ struct Args {
     /// 快照目录；须与内核 --profile 指向的 live.json 同目录。
     #[arg(long)]
     snapshot_dir: Option<PathBuf>,
+
+    /// 系统代理接管目标（内核入站地址）。
+    #[arg(long, default_value = "127.0.0.1:1080")]
+    proxy_target: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,6 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let config = app::GuiConfig {
             site: args.site,
             probe_default,
+            proxy_target: args.proxy_target,
         };
         app::run(handles, config)?;
         tracing::info!("gui exited");

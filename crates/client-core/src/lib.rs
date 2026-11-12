@@ -9,6 +9,7 @@ pub mod context;
 pub mod dns;
 pub mod geo;
 pub mod health;
+pub mod httpproxy;
 pub mod ipc;
 pub mod metrics;
 pub mod outbound;

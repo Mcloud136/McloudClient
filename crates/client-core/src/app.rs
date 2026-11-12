@@ -10,7 +10,7 @@ use crate::{
     context::AppContext,
     dns::{self, DnsServer, FakeIp},
     geo::GeoData,
-    ipc,
+    httpproxy, ipc,
     reload::{self, ReloadSpec, Source},
     socks5,
 };
@@ -80,11 +80,29 @@ pub async fn run(config: Config, mut shutdown: watch::Receiver<bool>) -> Result<
                 break;
             }
             accepted = listener.accept() => {
-                let (stream, peer) = accepted.context("accept socks5")?;
+                let (stream, peer) = accepted.context("accept inbound")?;
                 let session_context = Arc::clone(&context);
                 drop(tokio::spawn(async move {
-                    if let Err(error) = socks5::serve(stream, session_context).await {
-                        tracing::debug!(%peer, %error, "socks5 session closed");
+                    // 混合端口：0x05 → SOCKS5；ASCII 方法 → HTTP 代理（系统代理接管）。
+                    let mut first = [0u8; 1];
+                    let is_socks = match stream.peek(&mut first).await {
+                        Ok(_) => first[0] == socks5::SOCKS5_VERSION,
+                        Err(error) => {
+                            tracing::debug!(%peer, %error, "inbound peek failed");
+                            return;
+                        }
+                    };
+                    let result = if is_socks {
+                        socks5::serve(stream, session_context).await
+                    } else {
+                        httpproxy::serve(stream, session_context).await
+                    };
+                    if let Err(error) = result {
+                        if is_socks {
+                            tracing::debug!(%peer, %error, "inbound session closed");
+                        } else {
+                            tracing::info!(%peer, %error, "http proxy session error");
+                        }
                     }
                 }));
             }

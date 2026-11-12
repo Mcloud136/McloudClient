@@ -18,6 +18,7 @@ tracing = "0.1"
 # 预览期 API 精确 pin；仅 Windows 目标依赖，非 Windows 编译桩保证双平台 CI。
 [target.'cfg(windows)'.dependencies]
 windows-reactor = "=0.100.0"
+winreg = "0.55"
 
 [dev-dependencies]
 # 集成测试需要为桩内核实现 client-sidecar::Handler。

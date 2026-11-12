@@ -336,6 +336,15 @@ fn route(
             }
             (200, json!({ "data": true }))
         }
+        ("GET", "/api/v1/guest/comm/config") => (
+            200,
+            json!({ "data": {
+                "tos_url": null, "app_url": null,
+                "is_email_verify": 0, "is_invite_force": 0,
+                "is_recaptcha": 0, "recaptcha_site_key": null,
+                "app_description": "mock panel", "logo": null
+            } }),
+        ),
         ("GET", "/api/v1/user/plan/fetch") => (
             200,
             json!({ "data": [

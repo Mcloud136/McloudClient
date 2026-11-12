@@ -2,6 +2,10 @@
 //!
 //! 订阅基址可能多值随机轮换（生产盘点 §9），**只能按内容哈希判等**，
 //! 不能按 URL 字符串判等。reload 由调用方经 IPC 触发；本模块不碰 IPC。
+//!
+//! 渲染层仅 Windows（ADR 0005）：Linux 编译桩不消费本层，
+//! 故非 Windows 允许 dead_code（Windows 门禁仍全量检查，单测双平台跑）。
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use std::path::PathBuf;
 

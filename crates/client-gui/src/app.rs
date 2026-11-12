@@ -19,6 +19,7 @@ use crate::panel::{
     AccountView, CheckoutView, GuestConfig, OrderView, PanelClient, PanelError, PaymentMethodView,
     PlanView, SubscriptionView, period_label,
 };
+use crate::proxy::SystemProxy;
 use crate::shop::{OrderSession, ShopState, qr_png};
 use crate::state::{Command, LinkStatus, SharedState, fmt_age, fmt_bytes, fmt_uptime};
 use crate::sync::{SubscriptionSync, SyncOutcome};
@@ -47,6 +48,7 @@ static HANDLES: std::sync::OnceLock<GuiHandles> = std::sync::OnceLock::new();
 pub struct GuiConfig {
     pub site: String,
     pub probe_default: String,
+    pub proxy_target: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -124,6 +126,7 @@ pub enum Message {
     ChangePassword,
     ChangeDone(Result<(), PanelError>),
     SettingsDone(Result<(), PanelError>),
+    ToggleProxy,
     Tick,
 }
 
@@ -157,6 +160,7 @@ pub struct Shell {
     shop: ShopState,
     pw_old: String,
     pw_new: String,
+    proxy: SystemProxy,
 }
 
 impl Drop for Shell {
@@ -201,6 +205,7 @@ impl Component for Shell {
             shop: ShopState::default(),
             pw_old: String::new(),
             pw_new: String::new(),
+            proxy: SystemProxy::new(input.proxy_target.clone()),
         };
         context.spawn_background(|_| {
             std::thread::sleep(TICK);
@@ -607,6 +612,16 @@ impl Component for Shell {
                 self.error = Some("登录已失效，请重新登录".to_owned());
             }
             Message::SettingsDone(Err(error)) => self.error = Some(error.to_string()),
+            Message::ToggleProxy => {
+                let result = if self.proxy.is_taken() {
+                    self.proxy.release()
+                } else {
+                    self.proxy.takeover()
+                };
+                if let Err(error) = result {
+                    self.error = Some(format!("系统代理操作失败：{error}"));
+                }
+            }
             Message::Tick => {
                 self.last_revision = self.shared.revision();
                 // reload applied 事件到达 → 同步闭环完成。
@@ -901,6 +916,23 @@ impl Shell {
             LinkStatus::Disconnected => "内核未连接",
         };
         let mut kernel_items: Vec<View> = vec![kv("链路", link)];
+        kernel_items.push(kv(
+            "系统代理",
+            if self.proxy.is_taken() {
+                "已接管（退出时恢复原配置）"
+            } else {
+                "未接管"
+            },
+        ));
+        kernel_items.push(
+            Button::new()
+                .on_click(context.message(Message::ToggleProxy))
+                .content(if self.proxy.is_taken() {
+                    "释放系统代理"
+                } else {
+                    "接管系统代理"
+                }),
+        );
         if let Some(metrics) = &snapshot.kernel {
             kernel_items.push(kv("运行时长", &fmt_uptime(metrics.uptime_s)));
             kernel_items.push(kv("规则数", &metrics.rules.to_string()));
