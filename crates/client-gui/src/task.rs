@@ -2,8 +2,7 @@
 //!
 //! 职责：连接（指数退避）→ 1 Hz 轮询 `metrics` / `nodes` → 转发内核事件 →
 //! 执行 UI 发来的 `node_probe` / `probe_nodes` / `select_node` 命令。
-//! 状态变化时调用 `egui::Context::request_repaint`
-//! 唤醒 UI 线程按需重绘（事件驱动，无空转渲染）。
+//! 状态变化时调用 `wake` 回调通知渲染层（reactor 侧以 revision 轮询桥接）。
 //!
 //! 退出：UI 关闭窗口时 `TaskHandle` 落盘 Drop（或显式 `stop()`），任务在
 //! select 的 watch 分支感知后结束；进程退出本身也会回收线程。
@@ -44,6 +43,7 @@ const REQUEST_TIMEOUT_MS: u64 = 2_000;
 const INITIAL_BACKOFF_MS: u64 = 100;
 
 /// 任务停止句柄：UI Drop 时自动触发，也可显式调用 [`TaskHandle::stop`]。
+#[derive(Clone)]
 pub struct TaskHandle {
     shutdown: watch::Sender<bool>,
 }
@@ -62,12 +62,12 @@ impl TaskHandle {
 pub fn spawn(
     pipe: String,
     state: Arc<SharedState>,
-    ctx: eframe::egui::Context,
+    wake: Arc<dyn Fn() + Send + Sync>,
 ) -> (mpsc::UnboundedSender<Command>, TaskHandle) {
     let (commands, rx) = mpsc::unbounded_channel::<Command>();
     let (shutdown, shutdown_rx) = watch::channel(false);
 
-    spawn_platform(pipe, state, ctx, rx, shutdown_rx);
+    spawn_platform(pipe, state, wake, rx, shutdown_rx);
 
     (commands, TaskHandle { shutdown })
 }
@@ -76,12 +76,12 @@ pub fn spawn(
 fn spawn_platform(
     pipe: String,
     state: Arc<SharedState>,
-    ctx: eframe::egui::Context,
+    wake: Arc<dyn Fn() + Send + Sync>,
     rx: mpsc::UnboundedReceiver<Command>,
     shutdown: watch::Receiver<bool>,
 ) {
     let error_state = Arc::clone(&state);
-    let error_ctx = ctx.clone();
+    let error_wake = Arc::clone(&wake);
     let spawned = std::thread::Builder::new()
         .name("ipc-task".to_owned())
         .spawn(move || {
@@ -92,15 +92,15 @@ fn spawn_platform(
                 Ok(runtime) => runtime,
                 Err(error) => {
                     state.update(|s| s.set_disconnected(format!("runtime: {error}")));
-                    ctx.request_repaint();
+                    wake();
                     return;
                 }
             };
-            runtime.block_on(supervise(pipe, state, ctx, rx, shutdown));
+            runtime.block_on(supervise(pipe, state, wake, rx, shutdown));
         });
     if let Err(error) = spawned {
         error_state.update(|s| s.set_disconnected(format!("thread spawn: {error}")));
-        error_ctx.request_repaint();
+        error_wake();
     }
 }
 
@@ -108,7 +108,7 @@ fn spawn_platform(
 async fn supervise(
     pipe: String,
     state: Arc<SharedState>,
-    ctx: eframe::egui::Context,
+    wake: Arc<dyn Fn() + Send + Sync>,
     mut rx: mpsc::UnboundedReceiver<Command>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -123,23 +123,23 @@ async fn supervise(
             Ok(client) => {
                 backoff_ms = INITIAL_BACKOFF_MS;
                 state.update(|s| s.set_connected());
-                ctx.request_repaint();
+                wake();
                 tracing::info!(pipe = %pipe, "kernel ipc connected");
 
-                let error = session(&client, &state, &ctx, &mut rx, &mut shutdown, poll).await;
+                let error = session(&client, &state, &wake, &mut rx, &mut shutdown, poll).await;
                 client.close().await;
                 if *shutdown.borrow() {
                     break;
                 }
                 state.update(|s| s.set_disconnected(error.clone()));
-                ctx.request_repaint();
+                wake();
                 tracing::warn!(%error, "kernel ipc session ended");
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
             }
             Err(error) => {
                 state.update(|s| s.set_connect_failed(error.to_string()));
-                ctx.request_repaint();
+                wake();
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
             }
@@ -156,7 +156,7 @@ async fn supervise(
 async fn session(
     client: &PipeClient,
     state: &Arc<SharedState>,
-    ctx: &eframe::egui::Context,
+    wake: &Arc<dyn Fn() + Send + Sync>,
     rx: &mut mpsc::UnboundedReceiver<Command>,
     shutdown: &mut watch::Receiver<bool>,
     poll: Duration,
@@ -178,7 +178,7 @@ async fn session(
                 match command {
                     Some(Command::Probe { address, timeout_ms }) => {
                         tracing::info!(address = %address, "ipc probe command received");
-                        if let Err(error) = run_probe(client, state, ctx, &address, timeout_ms).await {
+                        if let Err(error) = run_probe(client, state, wake, &address, timeout_ms).await {
                             if is_connection_error(&error) {
                                 return error.to_string();
                             }
@@ -186,7 +186,7 @@ async fn session(
                         }
                     }
                     Some(Command::ProbeNodes { timeout_ms }) => {
-                        if let Err(error) = run_probe_nodes(client, state, ctx, timeout_ms).await {
+                        if let Err(error) = run_probe_nodes(client, state, wake, timeout_ms).await {
                             if is_connection_error(&error) {
                                 return error.to_string();
                             }
@@ -194,7 +194,7 @@ async fn session(
                         }
                     }
                     Some(Command::SelectNode { group, node }) => {
-                        if let Err(error) = run_select(client, state, ctx, &group, node).await {
+                        if let Err(error) = run_select(client, state, wake, &group, node).await {
                             if is_connection_error(&error) {
                                 return error.to_string();
                             }
@@ -217,13 +217,13 @@ async fn session(
                     }
                     tracing::warn!(%error, "nodes poll failed");
                 }
-                ctx.request_repaint();
+                wake();
             }
             event = events.recv() => {
                 match event {
                     Ok(Message::Event { kind, payload, .. }) => {
                         state.update(|s| s.apply_event(&kind, &payload));
-                        ctx.request_repaint();
+                        wake();
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
                         tracing::warn!(dropped, "gui events dropped");
@@ -267,7 +267,7 @@ async fn poll_nodes(client: &PipeClient, state: &Arc<SharedState>) -> Result<(),
 async fn run_probe_nodes(
     client: &PipeClient,
     state: &Arc<SharedState>,
-    ctx: &eframe::egui::Context,
+    wake: &Arc<dyn Fn() + Send + Sync>,
     timeout_ms: u64,
 ) -> Result<(), IpcError> {
     let params = serde_json::to_value(ProbeNodesParams {
@@ -285,7 +285,7 @@ async fn run_probe_nodes(
         "node probe batch completed"
     );
     state.update(|s| s.apply_probe_summary(summary));
-    ctx.request_repaint();
+    wake();
     poll_nodes(client, state).await
 }
 
@@ -294,7 +294,7 @@ async fn run_probe_nodes(
 async fn run_select(
     client: &PipeClient,
     state: &Arc<SharedState>,
-    ctx: &eframe::egui::Context,
+    wake: &Arc<dyn Fn() + Send + Sync>,
     group: &str,
     node: Option<String>,
 ) -> Result<(), IpcError> {
@@ -311,7 +311,7 @@ async fn run_select(
         }
         Err(other) => return Err(other),
     }
-    ctx.request_repaint();
+    wake();
     poll_nodes(client, state).await
 }
 
@@ -320,7 +320,7 @@ async fn run_select(
 async fn run_probe(
     client: &PipeClient,
     state: &Arc<SharedState>,
-    ctx: &eframe::egui::Context,
+    wake: &Arc<dyn Fn() + Send + Sync>,
     address: &str,
     timeout_ms: u64,
 ) -> Result<(), IpcError> {
@@ -350,7 +350,7 @@ async fn run_probe(
         "node probe completed"
     );
     state.update(|s| s.push_probe(result));
-    ctx.request_repaint();
+    wake();
     Ok(())
 }
 
@@ -371,7 +371,7 @@ fn is_connection_error(error: &IpcError) -> bool {
 fn spawn_platform(
     _pipe: String,
     state: Arc<SharedState>,
-    ctx: eframe::egui::Context,
+    wake: Arc<dyn Fn() + Send + Sync>,
     _rx: mpsc::UnboundedReceiver<Command>,
     _shutdown: watch::Receiver<bool>,
 ) {
@@ -382,7 +382,7 @@ fn spawn_platform(
             &serde_json::json!({ "note": "named-pipe transport is Windows only" }),
         );
     });
-    ctx.request_repaint();
+    wake();
 }
 
 #[cfg(all(test, windows))]
@@ -496,8 +496,8 @@ mod tests {
         });
 
         let state = SharedState::new();
-        let ctx = eframe::egui::Context::default();
-        let (commands, handle) = spawn(name.clone(), state.clone(), ctx);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let (commands, handle) = spawn(name.clone(), state.clone(), wake);
 
         // 连接 + 首轮 metrics（1 s 轮询）。
         wait_until(6, || state.snapshot().kernel.is_some(), "metrics").await;
@@ -562,8 +562,8 @@ mod tests {
         });
 
         let state = SharedState::new();
-        let ctx = eframe::egui::Context::default();
-        let (commands, handle) = spawn(name, state.clone(), ctx);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let (commands, handle) = spawn(name, state.clone(), wake);
 
         wait_until(6, || state.snapshot().link.connects > 0, "connect").await;
         commands

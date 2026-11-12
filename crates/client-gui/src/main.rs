@@ -1,31 +1,29 @@
-//! `client-gui`：McloudClient 只读状态面板（C1 首里程碑）。
+//! `client-gui`：McloudClient 主界面（ADR 0005：windows-reactor 原生 WinUI）。
 //!
 //! 进程模型（`docs/c1-ipc-contract.md` §1）：GUI 与控制面合并为同一进程、
 //! 持有到内核的唯一 IPC 连接；内核是独立的数据面进程，GUI 退出不影响转发。
 //!
-//! 渲染：egui + glow（预研 §5 D1 验证对象）；深色主题，设计 token 集中在
-//! [`theme`]。事件驱动重绘：后台任务状态变化时 `request_repaint`，另按轮询
-//! 周期保底一拍。
+//! 账号凭据边界（ADR 0004 L1）：密码 / auth_data / 订阅 URL 只以 `Secret<T>`
+//! 在控制面模块内持有；UI 只渲染脱敏 DTO。
 //!
-//! 字体：默认拉丁字体（无 CJK）；中文 UI 需先做字体决策（系统字体加载的
-//! RSS 代价 vs 内嵌子集字体的体积代价），见 `docs/c1-gui-tun-prestudy.md`。
+//! 非 Windows：编译桩（GUI 仅 Windows，内核/sidecar 跨平台不变）。
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
 
 use clap::Parser;
 use client_sidecar::logging;
 
-mod app;
 mod state;
 mod task;
-mod theme;
 
-use app::PanelApp;
-use state::SharedState;
+#[cfg(windows)]
+mod app;
+#[cfg(windows)]
+mod panel;
 
 #[derive(Debug, Parser)]
-#[command(name = "client-gui", version, about = "McloudClient 只读状态面板")]
+#[command(name = "client-gui", version, about = "McloudClient 主界面")]
 struct Args {
     /// 内核的命名管道名。
     #[arg(long)]
@@ -42,6 +40,10 @@ struct Args {
     /// 探测输入框的初始地址（便于自动化回归）。
     #[arg(long)]
     default_probe: Option<String>,
+
+    /// 面板站点基址（登录页高级设置可改）。
+    #[arg(long, default_value = "")]
+    site: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,43 +51,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _log_guard = logging::init_with(args.log_dir.clone(), "gui")?;
     tracing::info!(pipe = %args.pipe, poll_ms = args.poll_ms, "gui starting");
 
-    let state = SharedState::new();
-    let poll = Duration::from_millis(args.poll_ms.clamp(200, 60_000));
-    let probe_default = args
-        .default_probe
-        .unwrap_or_else(|| "127.0.0.1:80".to_owned());
-    let pipe = args.pipe.clone();
-
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("McloudClient")
-            .with_inner_size([460.0, 640.0])
-            .with_min_inner_size([380.0, 460.0]),
-        ..Default::default()
-    };
-
-    let state_for_app = state.clone();
-    // eframe::AppCreator 的返回类型（DynError 为 crate 私有别名，这里展开书写）。
-    let app_creator = move |cc: &eframe::CreationContext| -> Result<
-        Box<dyn eframe::App>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
-        // 深色主题（网络工具惯例）；颜色 token 见 theme.rs。
-        // 0.37 必须用 set_theme 切换主题选择，set_visuals 只改当前槽位样式。
-        cc.egui_ctx.set_theme(eframe::egui::ThemePreference::Dark);
-        let (commands, stop) =
-            task::spawn(pipe.clone(), state_for_app.clone(), cc.egui_ctx.clone());
-        Ok(Box::new(PanelApp::new(
-            pipe,
-            state_for_app,
+    #[cfg(windows)]
+    {
+        let state = state::SharedState::new();
+        let probe_default = args
+            .default_probe
+            .unwrap_or_else(|| "127.0.0.1:80".to_owned());
+        // reactor 的 LocalSender 非 Send：IPC 任务经 SharedState revision
+        // 供数，渲染层 250 ms 轮询桥接，wake 无需动作。
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
+        let (commands, task_handle) = task::spawn(args.pipe.clone(), Arc::clone(&state), wake);
+        let handles = app::GuiHandles {
+            shared: state,
             commands,
-            stop,
+            task: task_handle,
+            panel: panel::PanelClient::new(args.site.clone()),
+            store: Arc::from(client_sidecar::credential::default_store()),
+        };
+        let config = app::GuiConfig {
+            site: args.site,
             probe_default,
-            poll,
-        )))
-    };
-
-    eframe::run_native("McloudClient", options, Box::new(app_creator))?;
-    tracing::info!("gui exited");
+        };
+        app::run(handles, config)?;
+        tracing::info!("gui exited");
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = args;
+        println!("client-gui 仅支持 Windows（ADR 0005）；内核与 sidecar 跨平台可用。");
+    }
     Ok(())
 }

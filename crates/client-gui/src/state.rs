@@ -246,6 +246,7 @@ impl State {
 #[derive(Debug, Default)]
 pub struct SharedState {
     inner: Mutex<State>,
+    revision: std::sync::atomic::AtomicU64,
 }
 
 impl SharedState {
@@ -255,11 +256,19 @@ impl SharedState {
         Arc::new(Self::default())
     }
 
-    /// 后台任务侧更新入口。
+    /// 后台任务侧更新入口；每次更新递增 revision 供 UI 桥接检测。
     pub fn update(&self, apply: impl FnOnce(&mut State)) {
         if let Ok(mut guard) = self.inner.lock() {
             apply(&mut guard);
+            self.revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// 当前 revision（UI 轮询桥接用，纯内存读）。
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// UI 侧快照。
