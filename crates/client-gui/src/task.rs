@@ -26,9 +26,9 @@ use client_sidecar::IpcError;
 use client_sidecar::IpcTransport;
 #[cfg(windows)]
 use client_sidecar::contract::{
-    METHOD_METRICS, METHOD_NODE_PROBE, METHOD_NODES, METHOD_PROBE_NODES, METHOD_SELECT_NODE,
-    Metrics, NodeProbeParams, NodeProbeResult, NodesSnapshot, ProbeNodesParams, ProbeNodesResult,
-    SelectNodeParams,
+    METHOD_METRICS, METHOD_NODE_PROBE, METHOD_NODES, METHOD_PROBE_NODES, METHOD_RELOAD,
+    METHOD_SELECT_NODE, Metrics, NodeProbeParams, NodeProbeResult, NodesSnapshot, ProbeNodesParams,
+    ProbeNodesResult, SelectNodeParams,
 };
 #[cfg(windows)]
 use client_sidecar::ipc::pipe::PipeClient;
@@ -203,6 +203,27 @@ async fn session(
                                 return error.to_string();
                             }
                             tracing::warn!(%error, "select_node command failed");
+                        }
+                    }
+                    Some(Command::Reload) => {
+                        match client.request(METHOD_RELOAD, Value::Null).await {
+                            Ok(_) => tracing::info!("subscription reload requested"),
+                            Err(IpcError::Remote { code, message }) => {
+                                tracing::warn!(code = %code, %message, "reload rejected by kernel");
+                                state.update(|s| {
+                                    s.apply_event(
+                                        "sync",
+                                        &serde_json::json!({ "state": "rejected", "message": message }),
+                                    );
+                                });
+                                wake();
+                            }
+                            Err(error) => {
+                                if is_connection_error(&error) {
+                                    return error.to_string();
+                                }
+                                tracing::warn!(%error, "reload command failed");
+                            }
                         }
                     }
                     None => return "command channel closed".to_owned(),

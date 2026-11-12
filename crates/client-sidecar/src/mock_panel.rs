@@ -25,7 +25,12 @@ struct State {
     sessions: HashMap<String, String>,
     orders: HashMap<String, u8>,
     sub_version: u32,
+    sub_token: String,
     next_trade: u32,
+    password: String,
+    remind_expire: bool,
+    remind_traffic: bool,
+    auto_renewal: bool,
 }
 
 impl MockPanel {
@@ -35,12 +40,25 @@ impl MockPanel {
     ///
     /// 绑定失败时返回错误。
     pub async fn start() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        Self::start_on(0).await
+    }
+
+    /// 在回环指定端口启动（0 = 随机）；实机回归需同端口重启以复现会话失效。
+    ///
+    /// # Errors
+    ///
+    /// 绑定失败时返回错误。
+    pub async fn start_on(port: u16) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port))
             .await
             .context("bind mock panel")?;
         let addr = listener.local_addr().context("mock panel addr")?;
         let state = Arc::new(Mutex::new(State {
             port: addr.port(),
+            sub_token: "sub-token".to_owned(),
+            password: "12345678".to_owned(),
+            remind_expire: true,
+            remind_traffic: true,
             ..State::default()
         }));
         let server_state = Arc::clone(&state);
@@ -125,6 +143,7 @@ async fn handle(mut socket: TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
     let json_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
 
     let (status, response) = route(&method, &path, &params, &json_body, auth.as_deref(), &state);
+    eprintln!("MOCK REQ {method} {target} -> {status}");
     let payload = serde_json::to_vec(&response)?;
     let head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -158,7 +177,8 @@ fn route(
         ("POST", "/api/v1/passport/auth/login") => {
             let email = body["email"].as_str().unwrap_or_default();
             let password = body["password"].as_str().unwrap_or_default();
-            if !email.contains('@') || password.len() < 8 {
+            // 固定演示密码：使「错密码」态可在实机回归中复现。
+            if !email.contains('@') || password != state.password {
                 return (500, json!({ "message": "Incorrect email or password" }));
             }
             let token = format!("mock-jwt-{}", state.sessions.len() + 1);
@@ -179,7 +199,10 @@ fn route(
                     "email": email, "balance": 1250, "commission_balance": 0,
                     "transfer_enable": 107_374_182_400u64, "u": 26_843_545_600u64,
                     "d": 26_843_545_600u64, "expired_at": 1_789_000_000u64,
-                    "plan_id": 1, "banned": 0, "remind_expire": 1, "remind_traffic": 1,
+                    "plan_id": 1, "banned": 0,
+                    "remind_expire": i64::from(state.remind_expire),
+                    "remind_traffic": i64::from(state.remind_traffic),
+                    "auto_renewal": i64::from(state.auto_renewal),
                     "auto_renewal": 0, "device_limit": 5
                 } }),
             ),
@@ -189,8 +212,8 @@ fn route(
             Some(_) => (
                 200,
                 json!({ "data": {
-                        "plan_id": 1, "token": "sub-token",
-                        "subscribe_url": format!("http://127.0.0.1:{}/sub?token=sub-token", state.port),
+                        "plan_id": 1, "token": state.sub_token,
+                        "subscribe_url": format!("http://127.0.0.1:{}/sub?token={}", state.port, state.sub_token),
                         "u": 26_843_545_600u64, "d": 26_843_545_600u64,
                         "transfer_enable": 107_374_182_400u64, "expired_at": 1_789_000_000u64,
                         "reset_day": 1, "alive_ip": 1, "allow_new_period": 0
@@ -199,12 +222,17 @@ fn route(
             None => (403, json!({ "message": "未登录或登陆已过期" })),
         },
         ("GET", "/sub") => {
-            if params.get("token").map(String::as_str) != Some("sub-token") {
+            if params.get("token").map(String::as_str) != Some(state.sub_token.as_str()) {
                 return (403, json!({ "message": "token is error" }));
+            }
+            // 合法最小 profile：rules 数随版本变化（v0=5），供 reload 断言。
+            let mut rules = vec!["MATCH,DIRECT".to_owned()];
+            for i in 0..(4 + state.sub_version) {
+                rules.push(format!("DOMAIN,r{i}.example.invalid,DIRECT"));
             }
             (
                 200,
-                json!({ "content": format!("mock-subscription-v{}", state.sub_version) }),
+                json!({ "proxies": [], "proxy-groups": [], "rules": rules }),
             )
         }
         ("POST", "/api/v1/user/logout") => {
@@ -214,13 +242,17 @@ fn route(
             (200, json!({ "data": true }))
         }
         ("GET", "/api/v1/user/resetSecurity") => match auth.and_then(|a| state.sessions.get(a)) {
-            Some(_) => (
-                200,
-                json!(format!(
-                    "http://127.0.0.1:{}/sub?token=sub-token",
-                    state.port
-                )),
-            ),
+            Some(_) => {
+                state.next_trade += 1;
+                state.sub_token = format!("sub-token-{}", state.next_trade + 100);
+                (
+                    200,
+                    json!({ "data": format!(
+                        "http://127.0.0.1:{}/sub?token={}",
+                        state.port, state.sub_token
+                    ) }),
+                )
+            }
             None => (403, json!({ "message": "未登录或登陆已过期" })),
         },
         ("GET", "/api/v1/user/order/getPaymentMethod") => (
@@ -262,8 +294,93 @@ fn route(
                 .map(String::as_str)
                 .unwrap_or_default();
             match state.orders.get(trade_no) {
-                Some(status) => (200, json!(*status)),
+                Some(status) => (200, json!({ "data": status })),
                 None => (500, json!({ "message": "Order does not exist" })),
+            }
+        }
+        ("POST", "/mock/bump") => {
+            state.sub_version += 1;
+            (200, json!({ "data": true }))
+        }
+        ("POST", "/mock/pay") => {
+            let trade_no = body["trade_no"].as_str().unwrap_or_default();
+            state.orders.insert(trade_no.to_owned(), 3);
+            (200, json!({ "data": true }))
+        }
+        ("POST", "/api/v1/user/changePassword") => {
+            let ok = auth.and_then(|a| state.sessions.get(a)).is_some();
+            if !ok {
+                return (403, json!({ "message": "未登录或登陆已过期" }));
+            }
+            let old = body["old_password"].as_str().unwrap_or_default();
+            let new = body["new_password"].as_str().unwrap_or_default();
+            if old != state.password || new.len() < 8 {
+                return (500, json!({ "message": "The old password is wrong" }));
+            }
+            state.password = new.to_owned();
+            state.sessions.clear();
+            (200, json!({ "data": true }))
+        }
+        ("POST", "/api/v1/user/update") => {
+            if auth.and_then(|a| state.sessions.get(a)).is_none() {
+                return (403, json!({ "message": "未登录或登陆已过期" }));
+            }
+            if let Some(v) = body["remind_expire"].as_i64() {
+                state.remind_expire = v != 0;
+            }
+            if let Some(v) = body["remind_traffic"].as_i64() {
+                state.remind_traffic = v != 0;
+            }
+            if let Some(v) = body["auto_renewal"].as_i64() {
+                state.auto_renewal = v != 0;
+            }
+            (200, json!({ "data": true }))
+        }
+        ("GET", "/api/v1/user/plan/fetch") => (
+            200,
+            json!({ "data": [
+                { "id": 1, "name": "基础套餐", "content": "100 GB · 3 设备",
+                  "transfer_enable": 107_374_182_400u64, "show": 1, "renew": 1,
+                  "month_price": 1000, "quarter_price": 2700, "year_price": 9600,
+                  "capacity_limit": null },
+                { "id": 2, "name": "高级套餐", "content": "300 GB · 5 设备",
+                  "transfer_enable": 322_122_547_200u64, "show": 1, "renew": 1,
+                  "month_price": 2000, "year_price": 19200, "onetime_price": 50000,
+                  "capacity_limit": 10 }
+            ] }),
+        ),
+        ("POST", "/api/v1/user/coupon/check") => {
+            if body["code"].as_str() == Some("SAVE10") {
+                (
+                    200,
+                    json!({ "data": { "name": "九折券", "type": 1, "value": 10 } }),
+                )
+            } else {
+                (500, json!({ "message": "Coupon failed" }))
+            }
+        }
+        ("GET", "/api/v1/user/order/fetch") => {
+            let list: Vec<Value> = state
+                .orders
+                .iter()
+                .map(|(trade_no, status)| {
+                    json!({ "trade_no": trade_no, "status": status,
+                            "total_amount": 1000, "period": "month_price" })
+                })
+                .collect();
+            (200, json!({ "data": list }))
+        }
+        ("POST", "/api/v1/user/order/cancel") => {
+            let trade_no = body["trade_no"].as_str().unwrap_or_default();
+            match state.orders.get(trade_no) {
+                Some(0) => {
+                    state.orders.insert(trade_no.to_owned(), 2);
+                    (200, json!({ "data": true }))
+                }
+                _ => (
+                    500,
+                    json!({ "message": "You can only cancel pending orders" }),
+                ),
             }
         }
         _ => (404, json!({ "message": "not found" })),
@@ -328,7 +445,8 @@ mod tests {
             .to_owned();
         let sub = request("GET", &sub_url, &[], None).await.expect("sub");
         assert_eq!(sub.status, 200);
-        assert!(String::from_utf8_lossy(&sub.body).contains("mock-subscription-v0"));
+        let profile: Value = serde_json::from_slice(&sub.body).expect("profile json");
+        assert_eq!(profile["rules"].as_array().expect("rules").len(), 5);
 
         let save = request(
             "POST",
@@ -360,7 +478,7 @@ mod tests {
         )
         .await
         .expect("order check");
-        assert_eq!(check.body, b"0");
+        assert_eq!(check.body, b"{\"data\":0}");
 
         panel.pay_order(&trade_no);
         let check = request(
@@ -371,7 +489,7 @@ mod tests {
         )
         .await
         .expect("order check paid");
-        assert_eq!(check.body, b"3");
+        assert_eq!(check.body, b"{\"data\":3}");
 
         let logout = request(
             "POST",

@@ -9,7 +9,7 @@ use client_sidecar::secret::Secret;
 use serde_json::{Value, json};
 
 /// 面板错误分类（UI 据此决定回登录页 / 提示锁定 / 降级）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PanelError {
     /// 403：未登录 / JWT 过期 / 会话被撤销。
     Expired,
@@ -43,6 +43,9 @@ pub struct AccountView {
     pub used_bytes: u64,
     pub total_bytes: u64,
     pub plan_id: i64,
+    pub remind_expire: bool,
+    pub remind_traffic: bool,
+    pub auto_renewal: bool,
 }
 
 /// 脱敏订阅视图；订阅 URL 仍为凭据，只供快照注入，不进 UI。
@@ -185,6 +188,9 @@ impl PanelClient {
                 + data["d"].as_u64().unwrap_or_default(),
             total_bytes: data["transfer_enable"].as_u64().unwrap_or_default(),
             plan_id: data["plan_id"].as_i64().unwrap_or_default(),
+            remind_expire: data["remind_expire"].as_i64().unwrap_or(1) != 0,
+            remind_traffic: data["remind_traffic"].as_i64().unwrap_or(1) != 0,
+            auto_renewal: data["auto_renewal"].as_i64().unwrap_or(0) != 0,
         })
     }
 
@@ -227,6 +233,364 @@ impl PanelClient {
             Ok(_) | Err(PanelError::Expired) => Ok(()),
             Err(other) => Err(other),
         }
+    }
+
+    /// 修改密码；面板侧清除全部会话（调用方应强制回登录页）。
+    ///
+    /// # Errors
+    ///
+    /// 旧密码错误 / 会话失效 / 网络失败时返回错误。
+    pub async fn change_password(
+        &self,
+        auth: &Secret<String>,
+        old: &Secret<String>,
+        new: &Secret<String>,
+    ) -> Result<(), PanelError> {
+        self.call(
+            "POST",
+            "/api/v1/user/changePassword",
+            Some(auth),
+            Some(json!({ "old_password": old.expose(), "new_password": new.expose() })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 通知/续费设置。
+    ///
+    /// # Errors
+    ///
+    /// 会话失效 / 网络失败时返回错误。
+    pub async fn update_settings(
+        &self,
+        auth: &Secret<String>,
+        auto_renewal: bool,
+        remind_expire: bool,
+        remind_traffic: bool,
+    ) -> Result<(), PanelError> {
+        self.call(
+            "POST",
+            "/api/v1/user/update",
+            Some(auth),
+            Some(json!({
+                "auto_renewal": i64::from(auto_renewal),
+                "remind_expire": i64::from(remind_expire),
+                "remind_traffic": i64::from(remind_traffic),
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 重置订阅链接；返回新 URL（旧链接立即失效）。响应 `data` 为裸字符串。
+    ///
+    /// # Errors
+    ///
+    /// 会话失效 / 网络失败时返回错误。
+    pub async fn reset_security(
+        &self,
+        auth: &Secret<String>,
+    ) -> Result<Secret<String>, PanelError> {
+        let data = self
+            .call("GET", "/api/v1/user/resetSecurity", Some(auth), None)
+            .await?;
+        data["data"]
+            .as_str()
+            .map(|url| Secret::new(url.to_owned()))
+            .ok_or_else(|| PanelError::Network("missing subscribe_url".to_owned()))
+    }
+
+    /// 未登录站点配置（登录页扩展位：服务条款 / 邮箱验证 / 人机验证开关）。
+    ///
+    /// # Errors
+    ///
+    /// 网络失败时返回错误；调用方应降级为不显示扩展位。
+    pub async fn guest_config(&self) -> Result<GuestConfig, PanelError> {
+        let data = self
+            .call("GET", "/api/v1/guest/comm/config", None, None)
+            .await?;
+        let data = &data["data"];
+        Ok(GuestConfig {
+            tos_url: data["tos_url"].as_str().map(str::to_owned),
+            app_url: data["app_url"].as_str().map(str::to_owned),
+            is_email_verify: data["is_email_verify"].as_i64().unwrap_or(0) != 0,
+            is_recaptcha: data["is_recaptcha"].as_i64().unwrap_or(0) != 0,
+        })
+    }
+}
+
+/// 登录页扩展位（脱敏、无凭据）。
+#[derive(Debug, Clone, Default)]
+pub struct GuestConfig {
+    pub tos_url: Option<String>,
+    pub app_url: Option<String>,
+    pub is_email_verify: bool,
+    pub is_recaptcha: bool,
+}
+
+/// 套餐视图（金额整数分；周期价格表）。
+#[derive(Debug, Clone)]
+pub struct PlanView {
+    pub id: i64,
+    pub name: String,
+    pub content: String,
+    pub transfer_enable: u64,
+    pub renew: bool,
+    pub capacity_limit: Option<i64>,
+    /// (period key, 中文标签, 整数分)
+    pub prices: Vec<(String, String, i64)>,
+}
+
+/// 支付方式视图。
+#[derive(Debug, Clone)]
+pub struct PaymentMethodView {
+    pub id: i64,
+    pub name: String,
+    pub payment: String,
+}
+
+/// 结算结果：0 二维码 / 1 URL / -1 余额已全额支付。
+#[derive(Debug, Clone)]
+pub struct CheckoutView {
+    pub kind: i64,
+    pub data: String,
+}
+
+/// 订单视图（脱敏：不含凭据）。
+#[derive(Debug, Clone)]
+pub struct OrderView {
+    pub trade_no: String,
+    pub status: i64,
+    pub total_amount: i64,
+    pub period: String,
+}
+
+/// 周期 key → 中文标签（与生产 OrderSave 校验枚举一致）。
+#[must_use]
+pub fn period_label(key: &str) -> &'static str {
+    match key {
+        "month_price" => "月付",
+        "quarter_price" => "季付",
+        "half_year_price" => "半年付",
+        "year_price" => "年付",
+        "two_year_price" => "两年付",
+        "three_year_price" => "三年付",
+        "onetime_price" => "一次性",
+        "reset_price" => "流量重置包",
+        _ => "未知周期",
+    }
+}
+
+impl PanelClient {
+    /// 在售套餐列表（show=1，含剩余名额）。
+    ///
+    /// # Errors
+    ///
+    /// 会话失效 / 网络失败时返回错误。
+    pub async fn plans(&self, auth: &Secret<String>) -> Result<Vec<PlanView>, PanelError> {
+        let data = self
+            .call("GET", "/api/v1/user/plan/fetch", Some(auth), None)
+            .await?;
+        let list = data["data"].as_array().cloned().unwrap_or_default();
+        Ok(list
+            .iter()
+            .map(|p| PlanView {
+                id: p["id"].as_i64().unwrap_or_default(),
+                name: p["name"].as_str().unwrap_or_default().to_owned(),
+                content: p["content"].as_str().unwrap_or_default().to_owned(),
+                transfer_enable: p["transfer_enable"].as_u64().unwrap_or_default(),
+                renew: p["renew"].as_i64().unwrap_or(0) != 0,
+                capacity_limit: p["capacity_limit"].as_i64(),
+                prices: [
+                    "month_price",
+                    "quarter_price",
+                    "half_year_price",
+                    "year_price",
+                    "two_year_price",
+                    "three_year_price",
+                    "onetime_price",
+                    "reset_price",
+                ]
+                .iter()
+                .filter_map(|key| {
+                    p[*key]
+                        .as_i64()
+                        .map(|cents| ((*key).to_owned(), period_label(key).to_owned(), cents))
+                })
+                .collect(),
+            })
+            .collect())
+    }
+
+    /// 已启用支付方式。
+    ///
+    /// # Errors
+    ///
+    /// 会话失效 / 网络失败时返回错误。
+    pub async fn payment_methods(
+        &self,
+        auth: &Secret<String>,
+    ) -> Result<Vec<PaymentMethodView>, PanelError> {
+        let data = self
+            .call(
+                "GET",
+                "/api/v1/user/order/getPaymentMethod",
+                Some(auth),
+                None,
+            )
+            .await?;
+        let list = data["data"].as_array().cloned().unwrap_or_default();
+        Ok(list
+            .iter()
+            .map(|m| PaymentMethodView {
+                id: m["id"].as_i64().unwrap_or_default(),
+                name: m["name"].as_str().unwrap_or_default().to_owned(),
+                payment: m["payment"].as_str().unwrap_or_default().to_owned(),
+            })
+            .collect())
+    }
+
+    /// 优惠券校验；返回展示用折扣描述。
+    ///
+    /// # Errors
+    ///
+    /// 券无效 / 会话失效 / 网络失败时返回错误。
+    pub async fn coupon_check(
+        &self,
+        auth: &Secret<String>,
+        code: &str,
+        plan_id: i64,
+    ) -> Result<String, PanelError> {
+        let data = self
+            .call(
+                "POST",
+                "/api/v1/user/coupon/check",
+                Some(auth),
+                Some(json!({ "code": code, "plan_id": plan_id })),
+            )
+            .await?;
+        let coupon = &data["data"];
+        let name = coupon["name"].as_str().unwrap_or("优惠券");
+        let kind = coupon["type"].as_i64().unwrap_or(0);
+        let value = coupon["value"].as_i64().unwrap_or(0);
+        let label = if kind == 2 {
+            format!("{name}：抵扣 ¥{:.2}", value as f64 / 100.0)
+        } else {
+            format!("{name}：{value}% 折扣")
+        };
+        Ok(label)
+    }
+
+    /// 创建订单；返回 trade_no。
+    ///
+    /// # Errors
+    ///
+    /// 存在未完成订单 / 售罄 / 会话失效 / 网络失败时返回错误。
+    pub async fn order_save(
+        &self,
+        auth: &Secret<String>,
+        plan_id: i64,
+        period: &str,
+        coupon_code: Option<&str>,
+    ) -> Result<String, PanelError> {
+        let mut body = json!({ "plan_id": plan_id, "period": period });
+        if let Some(code) = coupon_code {
+            body["coupon_code"] = json!(code);
+        }
+        let data = self
+            .call("POST", "/api/v1/user/order/save", Some(auth), Some(body))
+            .await?;
+        data["data"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| PanelError::Network("missing trade_no".to_owned()))
+    }
+
+    /// 结算订单；type 0 二维码 / 1 URL / -1 余额全额。
+    ///
+    /// # Errors
+    ///
+    /// 订单不存在 / 支付方式不可用 / 会话失效 / 网络失败时返回错误。
+    pub async fn order_checkout(
+        &self,
+        auth: &Secret<String>,
+        trade_no: &str,
+        method: i64,
+    ) -> Result<CheckoutView, PanelError> {
+        let data = self
+            .call(
+                "POST",
+                "/api/v1/user/order/checkout",
+                Some(auth),
+                Some(json!({ "trade_no": trade_no, "method": method })),
+            )
+            .await?;
+        Ok(CheckoutView {
+            kind: data["type"].as_i64().unwrap_or(1),
+            data: data["data"].as_str().unwrap_or_default().to_owned(),
+        })
+    }
+
+    /// 订单状态裸整数：0 待支付 / 1 已支付 / 2 已取消 / 3 已完成 / 4 处理中。
+    ///
+    /// # Errors
+    ///
+    /// 订单不存在 / 会话失效 / 网络失败时返回错误。
+    pub async fn order_check(
+        &self,
+        auth: &Secret<String>,
+        trade_no: &str,
+    ) -> Result<i64, PanelError> {
+        let data = self
+            .call(
+                "GET",
+                &format!("/api/v1/user/order/check?trade_no={trade_no}"),
+                Some(auth),
+                None,
+            )
+            .await?;
+        Ok(data["data"].as_i64().unwrap_or(0))
+    }
+
+    /// 订单列表。
+    ///
+    /// # Errors
+    ///
+    /// 会话失效 / 网络失败时返回错误。
+    pub async fn orders(&self, auth: &Secret<String>) -> Result<Vec<OrderView>, PanelError> {
+        let data = self
+            .call("GET", "/api/v1/user/order/fetch", Some(auth), None)
+            .await?;
+        let list = data["data"].as_array().cloned().unwrap_or_default();
+        Ok(list
+            .iter()
+            .map(|o| OrderView {
+                trade_no: o["trade_no"].as_str().unwrap_or_default().to_owned(),
+                status: o["status"].as_i64().unwrap_or_default(),
+                total_amount: o["total_amount"].as_i64().unwrap_or_default(),
+                period: o["period"].as_str().unwrap_or_default().to_owned(),
+            })
+            .collect())
+    }
+
+    /// 取消待支付订单。
+    ///
+    /// # Errors
+    ///
+    /// 非待支付 / 会话失效 / 网络失败时返回错误。
+    pub async fn order_cancel(
+        &self,
+        auth: &Secret<String>,
+        trade_no: &str,
+    ) -> Result<(), PanelError> {
+        self.call(
+            "POST",
+            "/api/v1/user/order/cancel",
+            Some(auth),
+            Some(json!({ "trade_no": trade_no })),
+        )
+        .await?;
+        Ok(())
     }
 }
 

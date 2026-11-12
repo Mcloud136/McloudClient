@@ -14,12 +14,15 @@ use clap::Parser;
 use client_sidecar::logging;
 
 mod state;
+mod sync;
 mod task;
 
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
 mod panel;
+#[cfg(windows)]
+mod shop;
 
 #[derive(Debug, Parser)]
 #[command(name = "client-gui", version, about = "McloudClient 主界面")]
@@ -43,6 +46,10 @@ struct Args {
     /// 面板站点基址（登录页高级设置可改）。
     #[arg(long, default_value = "")]
     site: String,
+
+    /// 快照目录；须与内核 --profile 指向的 live.json 同目录。
+    #[arg(long)]
+    snapshot_dir: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -62,12 +69,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 供数，渲染层 250 ms 轮询桥接，wake 无需动作。
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         let (commands, task_handle) = task::spawn(args.pipe.clone(), Arc::clone(&state), wake);
+        let snapshot_dir = args.snapshot_dir.unwrap_or_else(|| {
+            let program_data =
+                std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_owned());
+            PathBuf::from(program_data)
+                .join("McloudClient")
+                .join("snapshots")
+        });
+        let sync = sync::SubscriptionSync::new(snapshot_dir)?;
         let handles = app::GuiHandles {
             shared: state,
             commands,
             task: task_handle,
             panel: panel::PanelClient::new(args.site.clone()),
             store: Arc::from(client_sidecar::credential::default_store()),
+            sync: Arc::new(tokio::sync::Mutex::new(sync)),
         };
         let config = app::GuiConfig {
             site: args.site,

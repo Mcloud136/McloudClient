@@ -47,6 +47,8 @@ pub enum Command {
         #[cfg_attr(not(windows), allow(dead_code))]
         node: Option<String>,
     },
+    /// A2：订阅快照写入后触发内核 reload。
+    Reload,
 }
 
 impl Command {
