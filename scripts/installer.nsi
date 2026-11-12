@@ -28,6 +28,9 @@ Section "Install"
   File "..\target\release\client-gui.exe"
   File "..\target\release\sidecar.exe"
   File "..\LICENSE"
+  SetOutPath "$INSTDIRssets"
+  File "..\crates\client-guissets\icon.ico"
+  SetOutPath "$INSTDIR"
 
   ; Windows App Runtime（reactor GUI 依赖）检查：缺失则提示并中止。
   nsExec::ExecToStack 'powershell -NoProfile -Command "if (Get-AppxPackage Microsoft.WindowsAppRuntime.1.* ) { exit 0 } else { exit 1 }"'
@@ -83,6 +86,8 @@ Section "Uninstall"
   Delete "$INSTDIR\client-gui.exe"
   Delete "$INSTDIR\sidecar.exe"
   Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIRssets\icon.ico"
+  RMDir "$INSTDIRssets"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient"

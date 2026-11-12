@@ -248,11 +248,62 @@ impl State {
     }
 }
 
+/// 内核指标视图（脱敏投影，供窗口输入）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MetricsView {
+    pub uptime_s: u64,
+    pub rules: usize,
+    pub connections_active: u64,
+    pub connections_total: u64,
+    pub bytes_up: u64,
+    pub bytes_down: u64,
+}
+
+/// 策略组视图。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupView {
+    pub name: String,
+    pub mode: String,
+    pub selected: String,
+    pub members: Vec<String>,
+}
+
+/// 节点行视图。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeRow {
+    pub name: String,
+    pub rtt_ms: Option<f64>,
+}
+
+/// 节点快照视图。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodesView {
+    pub groups: Vec<GroupView>,
+    pub nodes: Vec<NodeRow>,
+}
+
+/// 探测结果视图。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeView {
+    pub address: String,
+    pub reachable: bool,
+    pub rtt_ms: Option<f64>,
+    pub error_code: Option<String>,
+    pub age: String,
+}
+
+/// 事件视图。
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventView {
+    pub kind: String,
+    pub summary: String,
+    pub age: String,
+}
+
 /// 后台任务与 UI 共享的句柄；临界区只做克隆级操作。
 #[derive(Debug, Default)]
 pub struct SharedState {
     inner: Mutex<State>,
-    revision: std::sync::atomic::AtomicU64,
 }
 
 impl SharedState {
@@ -266,15 +317,7 @@ impl SharedState {
     pub fn update(&self, apply: impl FnOnce(&mut State)) {
         if let Ok(mut guard) = self.inner.lock() {
             apply(&mut guard);
-            self.revision
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-    }
-
-    /// 当前 revision（UI 轮询桥接用，纯内存读）。
-    #[must_use]
-    pub fn revision(&self) -> u64 {
-        self.revision.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// UI 侧快照。

@@ -17,7 +17,7 @@ tracing = "0.1"
 # GUI：windows-reactor（原生 WinUI，ADR 0005 定案，spike 实测 RSS 119 MiB）。
 # 预览期 API 精确 pin；仅 Windows 目标依赖，非 Windows 编译桩保证双平台 CI。
 [target.'cfg(windows)'.dependencies]
-windows-reactor = "=0.100.0"
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "8ca69fdaa9d69c78b9bcfbee96c6916f2282e7f0", version = "0.101.0" }
 winreg = "0.55"
 
 [dev-dependencies]

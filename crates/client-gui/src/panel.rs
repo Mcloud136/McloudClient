@@ -35,7 +35,7 @@ impl std::fmt::Display for PanelError {
 impl std::error::Error for PanelError {}
 
 /// 脱敏账户视图（UI 可直接渲染）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccountView {
     pub email_masked: String,
     pub balance_cents: i64,
@@ -320,7 +320,7 @@ impl PanelClient {
 }
 
 /// 登录页扩展位（脱敏、无凭据）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GuestConfig {
     pub tos_url: Option<String>,
     pub app_url: Option<String>,
@@ -329,7 +329,7 @@ pub struct GuestConfig {
 }
 
 /// 套餐视图（金额整数分；周期价格表）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanView {
     pub id: i64,
     pub name: String,
@@ -342,7 +342,7 @@ pub struct PlanView {
 }
 
 /// 支付方式视图。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PaymentMethodView {
     pub id: i64,
     pub name: String,
@@ -350,14 +350,14 @@ pub struct PaymentMethodView {
 }
 
 /// 结算结果：0 二维码 / 1 URL / -1 余额已全额支付。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckoutView {
     pub kind: i64,
     pub data: String,
 }
 
 /// 订单视图（脱敏：不含凭据）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OrderView {
     pub trade_no: String,
     pub status: i64,

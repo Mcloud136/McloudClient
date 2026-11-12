@@ -1,7 +1,5 @@
 //! A3 商店状态与二维码渲染（内存编码，不落盘；二维码只含付款地址，不含凭据）。
 
-use windows_reactor::EncodedImage;
-
 use crate::panel::{CheckoutView, OrderView, PaymentMethodView, PlanView};
 
 /// 进行中的订单会话。
@@ -10,7 +8,7 @@ pub struct OrderSession {
     pub trade_no: String,
     pub status: i64,
     pub checkout: Option<CheckoutView>,
-    pub qr: Option<EncodedImage>,
+    pub qr: Option<Vec<u8>>,
     pub started: std::time::Instant,
     pub last_poll: std::time::Instant,
 }
@@ -29,26 +27,6 @@ pub struct ShopState {
     pub order: Option<OrderSession>,
     pub notice: Option<String>,
     pub loaded: bool,
-}
-
-impl ShopState {
-    /// 当前选中套餐。
-    #[must_use]
-    pub fn plan(&self) -> Option<&PlanView> {
-        self.plans.get(self.plan_idx)
-    }
-
-    /// 当前选中周期 (key, label, cents)。
-    #[must_use]
-    pub fn period(&self) -> Option<&(String, String, i64)> {
-        self.plan().and_then(|p| p.prices.get(self.period_idx))
-    }
-
-    /// 当前选中支付方式 id。
-    #[must_use]
-    pub fn method_id(&self) -> Option<i64> {
-        self.methods.get(self.method_idx).map(|m| m.id)
-    }
 }
 
 /// 付款地址 → PNG 二维码（8 px/模块 + 4 模块静区）。
