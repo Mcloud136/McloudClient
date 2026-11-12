@@ -3,6 +3,7 @@ name = "client-core"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
+license = "MIT"
 description = "Minimal Rust client data plane: SOCKS5 -> VLESS/WS/TLS/mlkem (R2 PoC)"
 
 [[bin]]
@@ -16,7 +17,7 @@ windows-service = "0.7.0"
 anyhow = "1.0.104"
 arc-swap = "1.9.5"
 async-trait = "0.1"
-client-sidecar = { path = "../client-sidecar" }
+client-sidecar = { path = "../client-sidecar", version = "0.1.0" }
 clap = { version = "4.6.7", features = ["derive"] }
 futures = "0.3.34"
 ipnet = "2.12"
@@ -31,7 +32,7 @@ tracing = "0.1.44"
 uuid = { version = "1.29.2", features = ["serde", "v4"] }
 # 复用节点服务端仓库的共享协议 crate（VLESS 帧 + mlkem 握手）。
 # 以 tag 固定版本，保证仓库可独立构建。
-v2node-proto = { git = "https://github.com/Mcloud136/v2node-rust", tag = "v0.2.0" }
+v2node-proto = { git = "https://github.com/Mcloud136/v2node-rust", tag = "v0.2.0", version = "0.1.0" }
 
 [lints]
 workspace = true

@@ -4,11 +4,14 @@
 //! 业务方法（status/reload）在 S2 接入内核，快照管理在 S3。
 
 pub mod contract;
+pub mod credential;
 pub mod error;
 pub mod fetch;
 pub mod ipc;
 pub mod logging;
+pub mod mock_panel;
 pub mod protocol;
+pub mod secret;
 pub mod snapshot;
 
 pub use error::IpcError;
