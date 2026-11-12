@@ -71,7 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box<dyn std::error::Error + Send + Sync>,
     > {
         // 深色主题（网络工具惯例）；颜色 token 见 theme.rs。
-        cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
+        // 0.37 必须用 set_theme 切换主题选择，set_visuals 只改当前槽位样式。
+        cc.egui_ctx.set_theme(eframe::egui::ThemePreference::Dark);
         let (commands, stop) =
             task::spawn(pipe.clone(), state_for_app.clone(), cc.egui_ctx.clone());
         Ok(Box::new(PanelApp::new(

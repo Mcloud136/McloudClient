@@ -23,7 +23,7 @@ fn main() -> eframe::Result<(), eframe::Error> {
         "egui-memory-floor",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             Ok(Box::new(Floor {
                 frames: u64::default(),
             }))
