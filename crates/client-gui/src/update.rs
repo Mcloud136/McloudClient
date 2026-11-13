@@ -22,18 +22,8 @@ fn public_key() -> Result<Vec<u8>, PanelError> {
         .map_err(|e| PanelError::Network(format!("embedded public key: {e}")))
 }
 
-/// 更新源选择（用户可在 GUI 设置）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UpdateSource {
-    /// Gitee 优先，失败回退 GitHub。
-    #[default]
-    Auto,
-    /// 仅 Gitee（国内）。
-    Gitee,
-    /// 仅 GitHub。
-    Github,
-}
+/// 更新源选择（用户可在 GUI 设置）。定义在跨平台 `prefs` 模块。
+pub use crate::prefs::UpdateSource;
 
 /// Gitee 镜像 manifest（国内优先）。
 pub const GITEE_MANIFEST: &str =

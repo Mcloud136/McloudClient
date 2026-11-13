@@ -4,7 +4,18 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::update::UpdateSource;
+/// 更新源选择（用户可在 GUI 设置）。跨平台定义（Linux 编译桩也需要）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateSource {
+    /// Gitee 优先，失败回退 GitHub。
+    #[default]
+    Auto,
+    /// 仅 Gitee（国内）。
+    Gitee,
+    /// 仅 GitHub。
+    Github,
+}
 
 const PREFS_FILE: &str = "gui-prefs.json";
 
