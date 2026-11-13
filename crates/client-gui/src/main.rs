@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use client_sidecar::logging;
 
+#[cfg(windows)]
 mod prefs;
 mod rollback;
 mod rules_edit;
