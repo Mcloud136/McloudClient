@@ -95,6 +95,19 @@ impl SnapshotStore {
         Ok(true)
     }
 
+    /// 回滚到指定序号（升级前记录的回滚点）；序号不存在时返回 `false`。
+    ///
+    /// 与 [`Self::rollback`] 的区别：不假设「上一版」，而是精确恢复到调用方
+    /// 记录的升级前 seq（FA 规格二：恢复升级前的 `live.json` seq）。
+    pub fn rollback_to(&self, seq: u64) -> io::Result<bool> {
+        if !self.path_for(seq).is_file() {
+            return Ok(false);
+        }
+        self.update_current(seq)?;
+        self.sync_live(seq)?;
+        Ok(true)
+    }
+
     fn path_for(&self, seq: u64) -> PathBuf {
         self.dir.join(format!("{seq:04}.json"))
     }

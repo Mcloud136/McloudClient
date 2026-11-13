@@ -83,6 +83,19 @@ impl SubscriptionSync {
         &self.dir
     }
 
+    /// 当前快照序号（升级前记录回滚点用）；无快照返回 `None`。
+    ///
+    /// # Errors
+    ///
+    /// 快照目录读取失败时返回错误。
+    pub fn current_seq(&self) -> Result<Option<u64>> {
+        Ok(self
+            .store
+            .current()
+            .context("snapshot current")?
+            .map(|(seq, _)| seq))
+    }
+
     /// 读取当前生效快照的原始字节；无快照时返回 `None`。
     ///
     /// # Errors

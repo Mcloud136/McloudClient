@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use client_sidecar::logging;
 
+mod rollback;
 mod rules_edit;
 mod state;
 mod sync;
@@ -98,7 +99,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .join("McloudClient")
                 .join("snapshots")
         });
-        let sync = sync::SubscriptionSync::new(snapshot_dir)?;
+        let sync = sync::SubscriptionSync::new(snapshot_dir.clone())?;
+        // FA 规格二：升级后启动健康检查；窗口内持续失败则自动回滚（恢复上一版二进制 +
+        // 升级前快照 seq），回滚后以旧版继续启动。无回滚点或超窗则跳过。
+        if let Ok(Some(ustate)) = rollback::load_update_state(&snapshot_dir) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if rollback::in_health_window(&ustate, now) {
+                tracing::info!(prev_version = %ustate.prev_version, "post-update health check start");
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let healthy =
+                    rt.block_on(rollback::run_health_check(&args.pipe, ustate.started_at));
+                if healthy {
+                    tracing::info!("post-update health check passed");
+                    rollback::clear_update_state(&snapshot_dir)?;
+                } else {
+                    tracing::warn!("post-update health check failed, rolling back");
+                    // 回滚目标是回滚点记录的内核安装目录（GUI 与内核可能不同目录）。
+                    let install_dir = if ustate.install_dir.is_empty() {
+                        std::env::current_exe()?
+                            .parent()
+                            .map(std::path::Path::to_path_buf)
+                            .unwrap_or_default()
+                    } else {
+                        PathBuf::from(&ustate.install_dir)
+                    };
+                    match rollback::perform_rollback(
+                        &install_dir,
+                        &snapshot_dir,
+                        ustate.prev_snapshot_seq,
+                        "McloudCore",
+                    ) {
+                        Ok(()) => {
+                            rollback::clear_update_state(&snapshot_dir)?;
+                            tracing::info!("rollback completed, continuing with previous version");
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "rollback failed");
+                        }
+                    }
+                }
+            } else {
+                // 超窗：上次升级已完成，清除残留回滚点。
+                rollback::clear_update_state(&snapshot_dir)?;
+            }
+        }
         let handles = app::GuiHandles {
             shared: state,
             commands,

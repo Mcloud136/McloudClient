@@ -29,6 +29,12 @@ Section "Install"
   ; 兜底释放数据面端口：非服务形态的内核（开发 CLI）或卡死的服务不会响应 sc stop。
   nsExec::ExecToLog 'taskkill /IM client-core.exe /F'
   Sleep 1500
+  ; FA 规格二：覆盖前备份上一版二进制到 previous\（回滚来源，离线可回滚）。
+  ; 仅当已存在旧版本时备份；首次安装无旧文件，CopyFiles 失败可忽略。
+  CreateDirectory "$INSTDIR\previous"
+  CopyFiles /SILENT "$INSTDIR\client-core.exe" "$INSTDIR\previous\client-core.exe"
+  CopyFiles /SILENT "$INSTDIR\client-gui.exe" "$INSTDIR\previous\client-gui.exe"
+  CopyFiles /SILENT "$INSTDIR\sidecar.exe" "$INSTDIR\previous\sidecar.exe"
   SetOutPath "$INSTDIR"
   File "..\target\release\client-core.exe"
   File "..\target\release\client-gui.exe"

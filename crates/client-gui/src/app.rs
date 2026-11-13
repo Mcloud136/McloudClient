@@ -1115,11 +1115,40 @@ impl Component for MainWindow {
             Message::ApplyUpdate => {
                 if let Some(info) = input.vm.update_info.clone() {
                     tracing::info!(version = %info.version, "update download start");
+                    let sync = Arc::clone(&handles().sync);
                     context.spawn_background(move |_| {
-                        let result = block_on_panel(async { crate::update::download(&info).await });
+                        let result = block_on_panel(async {
+                            let path = crate::update::download(&info).await?;
+                            // FA 规格二：升级前记录回滚点（当前快照 seq + 版本）。
+                            let seq = {
+                                let guard = sync.lock().await;
+                                guard
+                                    .current_seq()
+                                    .map_err(|e| PanelError::Network(e.to_string()))?
+                                    .unwrap_or(0)
+                            };
+                            let dir = { sync.lock().await.dir().to_path_buf() };
+                            let install_dir = std::env::current_exe()
+                                .ok()
+                                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                                .unwrap_or_default();
+                            let state = crate::rollback::UpdateState {
+                                prev_version: env!("CARGO_PKG_VERSION").to_owned(),
+                                prev_snapshot_seq: seq,
+                                installer_path: path.display().to_string(),
+                                started_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0),
+                                install_dir: install_dir.display().to_string(),
+                            };
+                            crate::rollback::record_update_state(&dir, &state)
+                                .map_err(|e| PanelError::Network(e.to_string()))?;
+                            Ok(path)
+                        });
                         match &result {
                             Ok(path) => {
-                                tracing::info!(path = %path.display(), "update download verified")
+                                tracing::info!(path = %path.display(), "update download verified, rollback point recorded")
                             }
                             Err(error) => tracing::warn!(%error, "update download failed"),
                         }
