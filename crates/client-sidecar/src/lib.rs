@@ -13,6 +13,7 @@ pub mod mock_panel;
 pub mod protocol;
 pub mod secret;
 pub mod snapshot;
+pub mod update_sign;
 
 pub use error::IpcError;
 pub use ipc::{EventSink, Handler, IpcTransport};

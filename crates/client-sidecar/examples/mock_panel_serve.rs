@@ -19,6 +19,11 @@ async fn main() -> anyhow::Result<()> {
     {
         panel.set_installer(std::path::Path::new(&path))?;
     }
+    if let Some(i) = std::env::args().position(|a| a == "--sign-key")
+        && let Some(path) = std::env::args().nth(i + 1)
+    {
+        panel.set_sign_key(std::fs::read(&path)?);
+    }
     println!("mock panel listening at {}", panel.base_url());
     println!("login: any email with @ + password 12345678");
     loop {

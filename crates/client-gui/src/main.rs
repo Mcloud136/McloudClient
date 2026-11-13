@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use client_sidecar::logging;
 
+mod prefs;
 mod rollback;
 mod rules_edit;
 mod state;
@@ -156,11 +157,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             store: Arc::from(client_sidecar::credential::default_store()),
             sync: Arc::new(tokio::sync::Mutex::new(sync)),
         };
+        let prefs = prefs::load(&snapshot_dir);
         let config = app::GuiConfig {
             site: args.site,
             probe_default,
             proxy_target: args.proxy_target,
             update_manifest: args.update_manifest,
+            update_source: prefs.update_source,
+            prefs_dir: snapshot_dir.clone(),
         };
         app::run(handles, config)?;
         tracing::info!("gui exited");

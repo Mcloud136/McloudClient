@@ -55,6 +55,8 @@ pub struct GuiConfig {
     pub probe_default: String,
     pub proxy_target: String,
     pub update_manifest: String,
+    pub update_source: crate::update::UpdateSource,
+    pub prefs_dir: std::path::PathBuf,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -139,6 +141,7 @@ pub enum Message {
     SettingsDone(Result<(), PanelError>),
     ToggleProxy,
     CheckUpdate,
+    SetUpdateSource(crate::update::UpdateSource),
     UpdateChecked(Result<Option<crate::update::UpdateInfo>, String>),
     ApplyUpdate,
     UpdateReady(Result<std::path::PathBuf, String>),
@@ -181,6 +184,8 @@ struct ViewModel {
     last_refresh: Instant,
     last_check: Instant,
     update_manifest: String,
+    update_source: crate::update::UpdateSource,
+    prefs_dir: std::path::PathBuf,
     update_info: Option<crate::update::UpdateInfo>,
     update_status: String,
     update_check_requested: bool,
@@ -276,6 +281,8 @@ struct TrayApp {
     window_visible: bool,
     exiting: bool,
     update_manifest: String,
+    update_source: crate::update::UpdateSource,
+    prefs_dir: std::path::PathBuf,
     update_info: Option<crate::update::UpdateInfo>,
     update_status: String,
     update_check_requested: bool,
@@ -316,6 +323,8 @@ impl Application for TrayApp {
             window_visible: true,
             exiting: false,
             update_manifest: input.update_manifest.clone(),
+            update_source: input.update_source,
+            prefs_dir: input.prefs_dir.clone(),
             update_info: None,
             update_status: String::new(),
             update_check_requested: false,
@@ -596,6 +605,15 @@ impl Application for TrayApp {
             Message::UpdateReady(Err(error)) => {
                 self.update_status = format!("更新包校验失败：{error}");
             }
+            Message::SetUpdateSource(source) => {
+                self.update_source = source;
+                let prefs = crate::prefs::GuiPrefs {
+                    update_source: source,
+                };
+                if let Err(error) = crate::prefs::save(&self.prefs_dir, &prefs) {
+                    tracing::warn!(%error, "save update source pref failed");
+                }
+            }
             Message::ToggleProxy => {
                 let result = if self.proxy.is_taken() {
                     self.proxy.release()
@@ -825,6 +843,8 @@ impl TrayApp {
             last_refresh: self.last_refresh,
             last_check: self.last_check,
             update_manifest: self.update_manifest.clone(),
+            update_source: self.update_source,
+            prefs_dir: self.prefs_dir.clone(),
             update_info: self.update_info.clone(),
             update_status: self.update_status.clone(),
             update_check_requested: self.update_check_requested,
@@ -854,8 +874,9 @@ impl Component for MainWindow {
         });
         if input.vm.update_check_requested {
             let url = input.vm.update_manifest.clone();
+            let source = input.vm.update_source;
             context.spawn_background(move |_| {
-                let result = block_on_panel(async { crate::update::check(&url).await });
+                let result = block_on_panel(async { check_update(&url, source).await });
                 Message::UpdateChecked(result.map_err(|e| e.to_string()))
             });
         }
@@ -1103,8 +1124,9 @@ impl Component for MainWindow {
             }
             Message::CheckUpdate => {
                 let url = input.vm.update_manifest.clone();
+                let source = input.vm.update_source;
                 context.spawn_background(move |_| {
-                    let result = block_on_panel(async { crate::update::check(&url).await });
+                    let result = block_on_panel(async { check_update(&url, source).await });
                     Message::UpdateChecked(result.map_err(|e| e.to_string()))
                 });
             }
@@ -1236,6 +1258,18 @@ impl Component for MainWindow {
             Phase::Authenticated => home_view(vm, context),
             _ => login_view(vm, context),
         }
+    }
+}
+
+/// 检查更新：`--update-manifest` 显式覆盖（mock 回归）优先，否则按用户更新源走多渠道。
+async fn check_update(
+    manifest_override: &str,
+    source: crate::update::UpdateSource,
+) -> Result<Option<crate::update::UpdateInfo>, PanelError> {
+    if manifest_override.is_empty() {
+        crate::update::check_sources(source).await
+    } else {
+        crate::update::check(manifest_override).await
     }
 }
 
@@ -1984,6 +2018,33 @@ fn account_view(vm: &ViewModel, context: &mut ViewContext<MainWindow>) -> View {
         Button::new()
             .on_click(context.message(Message::Logout))
             .content("登出并清除已保存凭据")
+            .into(),
+    );
+    items.push(
+        TextBlock::new()
+            .text("更新源（Gitee 国内优先，GitHub 备用）")
+            .font_size(12.0)
+            .into(),
+    );
+    items.push(
+        ComboBox::new()
+            .items_source(vec![
+                "自动（Gitee 优先）".to_owned(),
+                "仅 Gitee".to_owned(),
+                "仅 GitHub".to_owned(),
+            ])
+            .selected_index(match vm.update_source {
+                crate::update::UpdateSource::Auto => 0,
+                crate::update::UpdateSource::Gitee => 1,
+                crate::update::UpdateSource::Github => 2,
+            })
+            .on_selection_changed(context.callback(|idx: Option<usize>| {
+                Message::SetUpdateSource(match idx.unwrap_or(0) {
+                    1 => crate::update::UpdateSource::Gitee,
+                    2 => crate::update::UpdateSource::Github,
+                    _ => crate::update::UpdateSource::Auto,
+                })
+            }))
             .into(),
     );
     items.push(

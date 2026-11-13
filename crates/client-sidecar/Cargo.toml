@@ -20,6 +20,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process", "signal"] }
 zeroize = "1"
 sha2 = "0.10"
+# Ed25519 更新 manifest 签名（FA 硬前置）；ring 已在依赖树（rustls-webpki）。
+ring = "0.17.14"
 
 [target.'cfg(windows)'.dependencies]
 # keyring 3 + 仅 windows-native：避免 4.x v1 feature 捆绑 Linux zbus 后端

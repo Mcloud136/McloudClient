@@ -29,6 +29,8 @@ struct State {
     next_trade: u32,
     installer: Option<Vec<u8>>,
     installer_sha: String,
+    /// 更新 manifest 签名私钥（PKCS#8 DER）；缺省用临时密钥（验签必失败，供负例）。
+    sign_key: Option<Vec<u8>>,
     password: String,
     remind_expire: bool,
     remind_traffic: bool,
@@ -105,11 +107,31 @@ impl MockPanel {
         Ok(())
     }
 
+    /// 测试控制：注入更新 manifest 签名私钥（PKCS#8 DER）。
+    /// 注入后 `/update/manifest` 返回合法签名；未注入时用临时密钥（验签必失败）。
+    pub fn set_sign_key(&self, pkcs8_der: Vec<u8>) {
+        self.state.lock().expect("mock state").sign_key = Some(pkcs8_der);
+    }
+
     /// 测试控制：订阅内容版本 +1（模拟面板侧订阅变更）。
     pub fn bump_subscription(&self) {
         let mut state = self.state.lock().expect("mock state");
         state.sub_version += 1;
     }
+}
+
+/// 计算 manifest 签名 hex：有注入私钥用它，否则用临时密钥（验签必失败，供负例）。
+fn sign_manifest(sign_key: &Option<Vec<u8>>, version: &str, url: &str, sha256: &str) -> String {
+    let key = match sign_key {
+        Some(k) => k.clone(),
+        None => crate::update_sign::generate_keypair()
+            .map(|(k, _)| k)
+            .unwrap_or_default(),
+    };
+    let message = crate::update_sign::signed_message(version, url, sha256);
+    crate::update_sign::sign(&key, &message)
+        .map(|sig| crate::update_sign::hex_encode(&sig))
+        .unwrap_or_default()
 }
 
 async fn handle(mut socket: TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
@@ -336,23 +358,44 @@ fn route(
             }
         }
         ("GET", "/update/manifest") => match &state.installer {
+            Some(_) => {
+                let url = format!("http://127.0.0.1:{}/update/installer", state.port);
+                let sig = sign_manifest(&state.sign_key, "0.2.0", &url, &state.installer_sha);
+                (
+                    200,
+                    json!({
+                        "version": "0.2.0",
+                        "url": url,
+                        "sha256": state.installer_sha,
+                        "signature": sig,
+                    }),
+                )
+            }
+            None => (404, json!({ "message": "no installer configured" })),
+        },
+        ("GET", "/update/manifest-bad") => match &state.installer {
+            Some(_) => {
+                let url = format!("http://127.0.0.1:{}/update/installer", state.port);
+                let sig = sign_manifest(&state.sign_key, "0.2.0", &url, &state.installer_sha);
+                (
+                    200,
+                    json!({
+                        "version": "0.2.0",
+                        "url": url,
+                        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                        "signature": sig,
+                    }),
+                )
+            }
+            None => (404, json!({ "message": "no installer configured" })),
+        },
+        ("GET", "/update/manifest-unsigned") => match &state.installer {
             Some(_) => (
                 200,
                 json!({
                     "version": "0.2.0",
                     "url": format!("http://127.0.0.1:{}/update/installer", state.port),
                     "sha256": state.installer_sha,
-                }),
-            ),
-            None => (404, json!({ "message": "no installer configured" })),
-        },
-        ("GET", "/update/manifest-bad") => match &state.installer {
-            Some(_) => (
-                200,
-                json!({
-                    "version": "0.2.0",
-                    "url": format!("http://127.0.0.1:{}/update/installer", state.port),
-                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
                 }),
             ),
             None => (404, json!({ "message": "no installer configured" })),
@@ -596,5 +639,72 @@ mod tests {
             .await
             .expect("no auth");
         assert_eq!(no_auth.status, 403);
+    }
+
+    #[tokio::test]
+    async fn manifest_signature_verifies_with_injected_key() {
+        use crate::update_sign;
+        let panel = MockPanel::start().await.expect("start");
+        let base = panel.base_url();
+        let (priv_key, pub_key) = update_sign::generate_keypair().expect("keygen");
+        panel.set_sign_key(priv_key);
+        // 用一个真实小文件当安装器。
+        let dir = std::env::temp_dir().join(format!("mcloud-mock-inst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let inst = dir.join("setup.exe");
+        std::fs::write(&inst, b"fake installer bytes").expect("write");
+        panel.set_installer(&inst).expect("set installer");
+
+        let resp = request("GET", &format!("{base}/update/manifest"), &[], None)
+            .await
+            .expect("manifest");
+        assert_eq!(resp.status, 200);
+        let v: Value = serde_json::from_slice(&resp.body).expect("json");
+        let version = v["version"].as_str().expect("version");
+        let url = v["url"].as_str().expect("url");
+        let sha = v["sha256"].as_str().expect("sha");
+        let sig = v["signature"].as_str().expect("signature");
+        let msg = update_sign::signed_message(version, url, sha);
+        update_sign::verify(&pub_key, &msg, sig).expect("valid signature must verify");
+
+        // 未签名端点：无 signature 字段。
+        let unsigned = request(
+            "GET",
+            &format!("{base}/update/manifest-unsigned"),
+            &[],
+            None,
+        )
+        .await
+        .expect("unsigned");
+        let uv: Value = serde_json::from_slice(&unsigned.body).expect("json");
+        assert!(uv.get("signature").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn manifest_without_injected_key_fails_verification() {
+        use crate::update_sign;
+        let panel = MockPanel::start().await.expect("start");
+        let base = panel.base_url();
+        let (_, pub_key) = update_sign::generate_keypair().expect("keygen");
+        let dir = std::env::temp_dir().join(format!("mcloud-mock-inst2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let inst = dir.join("setup.exe");
+        std::fs::write(&inst, b"x").expect("write");
+        panel.set_installer(&inst).expect("set installer");
+        let resp = request("GET", &format!("{base}/update/manifest"), &[], None)
+            .await
+            .expect("manifest");
+        let v: Value = serde_json::from_slice(&resp.body).expect("json");
+        let msg = update_sign::signed_message(
+            v["version"].as_str().expect("v"),
+            v["url"].as_str().expect("u"),
+            v["sha256"].as_str().expect("s"),
+        );
+        // 临时密钥签名，与任何真实公钥都不匹配。
+        assert!(
+            update_sign::verify(&pub_key, &msg, v["signature"].as_str().expect("sig")).is_err()
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -244,7 +244,7 @@ grep -F "$SUB_PATH" "$LOG" \
 | 项 | 方案 |
 |---|---|
 | Windows 安装包 | MSI / EXE，代码签名（EV / OV），C1 后启动采购 |
-| 自动更新 | 签名 manifest（Ed25519）+ 版本差分；内核、sidecar、UI 独立更新 |
+| 自动更新 | 签名 manifest（Ed25519）+ 版本差分；内核、sidecar、UI 独立更新。**2026-11-13 已实现**：ring Ed25519，公钥编译期内嵌 GUI，私钥 DPAPI 加密存仓库外；双渠道（Gitee 国内优先 `gitee.com/wxbns/mcloud-client` + GitHub `Mcloud136/McloudClient`），GUI 账户区可选更新源（自动/仅 Gitee/仅 GitHub，持久化 `gui-prefs.json`）；验签失败硬拒绝，无降级路径。签名消息 `version\nurl\nsha256`，manifest 增 `signature` 字段（64 字节 hex）。 |
 | 内核分发合规 | 随包附 GPL 原文、源码获取方式、fork 改动说明；产品命名与 UI 文案规避 `mihomo` 字样与 sing-box 关联暗示 |
 | 崩溃与日志 | 本地环形日志 + 用户主动导出；默认不上传 |
 | 遥测 | 默认关闭；如需开启只上报匿名计数（连接成败、错误码），不含域名与 IP |
@@ -318,6 +318,8 @@ UI 引入后会同时演进 IPC、快照与配置 schema，升级失败必须可
 | 手动回滚 | 保留上一版二进制与最近 5 版快照，回滚后转发探测必须成功 |
 
 升级前置：Ed25519 签名 manifest 校验、二进制 SHA-256 pin、升级前记录当前快照 seq 作为回滚点。FA 必须实际执行一次「升级 → 强制失败 → 回滚 → 转发正常」演练；未演练不得进入 C3。
+
+**签名实现状态（2026-11-13）**：Ed25519 验签已落地（`client-sidecar::update_sign` 单一事实源，GUI `update.rs` 强制验签）。实机三例闭环：合法签名接受 / 未签名硬拒绝 / 错签名硬拒绝（`_gui_spike/run_sign.sh`）。密钥：本机生成，私钥 DPAPI 加密存 `D:\wxmuma\_secrets\mcloud-update\`（永不入库），公钥 `crates/client-gui/src/update-public-key.hex` 入库内嵌；离线备份 `private.pk8.offline-backup` 由用户保管。签名工具 `tools/manifest-sign`（keygen/sign），发布签名经 `_secrets/sign_manifest.py`（DPAPI 解密→签名→擦除临时明文）。**待办**：Gitee 仓库已建（`wxbns/mcloud-client`）但尚未推送代码与签名 manifest；正式发布前需把签名后的 `docs/update-manifest.json` 推到两个渠道。
 
 ---
 
