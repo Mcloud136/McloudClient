@@ -1,10 +1,13 @@
 //! 内核侧 IPC 方法处理。
 //!
 //! 提供 `status` / `reload` / `metrics` / `node_probe` / `nodes` /
-//! `probe_nodes` / `select_node`。`reload` 复用与定时重载相同的
-//! 「先构建、后替换」路径，失败时保留现有路由器。
+//! `probe_nodes` / `select_node` / `log_tail` / `diagnostics`。
+//! `reload` 复用与定时重载相同的「先构建、后替换」路径，失败时保留现有路由器。
 
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,23 +17,39 @@ use async_trait::async_trait;
 use client_sidecar::{
     EventSink, Handler, IpcError,
     contract::{
-        ERR_FORBIDDEN_TARGET, ERR_INVALID_PARAMS, ERR_UNKNOWN_GROUP, ERR_UNKNOWN_METHOD,
-        ERR_UNKNOWN_NODE, MAX_PROBE_TIMEOUT_MS, METHOD_METRICS, METHOD_NODE_PROBE, METHOD_NODES,
-        METHOD_PROBE_NODES, METHOD_RELOAD, METHOD_SELECT_NODE, METHOD_STATUS, NodeProbeOutcome,
-        NodeProbeParams, NodeProbeResult, ProbeNodesParams, ProbeNodesResult, SelectNodeParams,
-        SelectNodeResult, is_loopback_target,
+        DEFAULT_LOG_TAIL_LINES, ERR_FORBIDDEN_TARGET, ERR_INVALID_PARAMS, ERR_UNKNOWN_GROUP,
+        ERR_UNKNOWN_METHOD, ERR_UNKNOWN_NODE, LogTailParams, LogTailResult, MAX_LOG_TAIL_LINES,
+        MAX_PROBE_TIMEOUT_MS, METHOD_DIAGNOSTICS, METHOD_LOG_TAIL, METHOD_METRICS,
+        METHOD_NODE_PROBE, METHOD_NODES, METHOD_PROBE_NODES, METHOD_RELOAD, METHOD_SELECT_NODE,
+        METHOD_STATUS, NodeProbeOutcome, NodeProbeParams, NodeProbeResult, ProbeNodesParams,
+        ProbeNodesResult, SelectNodeParams, SelectNodeResult, is_loopback_target,
     },
 };
 use futures::future::join_all;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 
-use crate::{context::AppContext, geo::GeoData, reload, router::SelectionError};
+use crate::{
+    context::AppContext,
+    geo::GeoData,
+    redact, reload,
+    router::{Route, SelectionError},
+    rules::Target,
+};
+
+/// 内核运行环境信息，供 `log_tail` / `diagnostics` 使用。
+pub struct KernelEnv {
+    /// 内核日志文件路径；缺省时 `log_tail` 返回空。
+    pub log_path: Option<PathBuf>,
+    /// fake-ip DNS 服务是否启用。
+    pub dns_enabled: bool,
+}
 
 pub struct KernelHandler {
     context: Arc<AppContext>,
     source: reload::Source,
     geo: Arc<GeoData>,
+    env: KernelEnv,
     version: AtomicU64,
     started: Instant,
     /// 最近一次 `probe_nodes` 的结果，按节点名索引；不写健康表，避免污染 `url-test`。
@@ -39,11 +58,17 @@ pub struct KernelHandler {
 
 impl KernelHandler {
     #[must_use]
-    pub fn new(context: Arc<AppContext>, source: reload::Source, geo: Arc<GeoData>) -> Self {
+    pub fn new(
+        context: Arc<AppContext>,
+        source: reload::Source,
+        geo: Arc<GeoData>,
+        env: KernelEnv,
+    ) -> Self {
         Self {
             context,
             source,
             geo,
+            env,
             version: AtomicU64::new(0),
             started: Instant::now(),
             probe_cache: Mutex::new(HashMap::new()),
@@ -102,6 +127,104 @@ impl KernelHandler {
                 reload::Source::Url(_) => "url",
             },
         })
+    }
+
+    /// 环形日志尾部读取；下发前逐行脱敏（契约 §6 第 3 条）。
+    fn log_tail(&self, params: Value) -> Result<Value, IpcError> {
+        let params: LogTailParams =
+            serde_json::from_value(object_params(params)).map_err(|error| IpcError::Remote {
+                code: ERR_INVALID_PARAMS.to_owned(),
+                message: error.to_string(),
+            })?;
+        let requested = params.lines.unwrap_or(DEFAULT_LOG_TAIL_LINES);
+        if requested == 0 || requested > MAX_LOG_TAIL_LINES {
+            return Err(IpcError::Remote {
+                code: ERR_INVALID_PARAMS.to_owned(),
+                message: format!("lines must be 1..={MAX_LOG_TAIL_LINES}"),
+            });
+        }
+        let redactor = redact::from_router(&self.context.router());
+        let lines: Vec<String> = self
+            .read_log_tail(requested)
+            .iter()
+            .map(|line| redactor.redact(line))
+            .collect();
+        let returned = lines.len();
+        serde_json::to_value(LogTailResult {
+            requested,
+            returned,
+            lines,
+        })
+        .map_err(|error| IpcError::Remote {
+            code: "serialize_failed".to_owned(),
+            message: error.to_string(),
+        })
+    }
+
+    /// 读取日志文件尾部 N 行（最多回看 256 KiB，避免整文件加载）。
+    fn read_log_tail(&self, count: usize) -> Vec<String> {
+        let Some(path) = &self.env.log_path else {
+            return Vec::new();
+        };
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return Vec::new();
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(256 * 1024);
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return Vec::new();
+        }
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_err() {
+            return Vec::new();
+        }
+        let text = String::from_utf8_lossy(&buf);
+        let mut lines: Vec<&str> = text.lines().collect();
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0); // 丢弃可能被截断的首行
+        }
+        let skip = lines.len().saturating_sub(count);
+        lines[skip..].iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// 连接统计 + DNS 泄漏自检 + 崩溃取证（日志内容脱敏后下发）。
+    fn diagnostics(&self) -> Value {
+        let mut body = self.metrics_body();
+        let router = self.context.router();
+        // DNS 自检：知名解析器 IP 的路由判定；direct 意味着 DNS 流量可能绕过代理。
+        let resolver_route = match router.route(&Target::Ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))))
+        {
+            Ok(Route::Proxy(_)) => "proxy",
+            Ok(Route::Direct) => "direct",
+            Ok(Route::Reject) => "reject",
+            Err(_) => "unknown",
+        };
+        body["dns"] = json!({
+            "server_enabled": self.env.dns_enabled,
+            "resolver_route": resolver_route,
+            "fakeip_entries": self.context.fakeip.len(),
+        });
+        let redactor = redact::from_router(&router);
+        let tail = self.read_log_tail(MAX_LOG_TAIL_LINES);
+        let panics: Vec<String> = tail
+            .iter()
+            .filter(|line| line.contains("thread panicked"))
+            .map(|line| redactor.redact(line))
+            .collect();
+        body["crash"] = json!({
+            "panic_count": panics.len(),
+            "last_panic": panics.last(),
+        });
+        body["log"] = json!({
+            "file": self.env.log_path.as_ref().map(|p| p.display().to_string()),
+            "size_bytes": self
+                .env
+                .log_path
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len()),
+        });
+        body
     }
 
     /// 策略组与节点的可观测快照（不含节点地址与凭据）。
@@ -322,6 +445,8 @@ impl Handler for KernelHandler {
             METHOD_NODES => self.nodes_body(),
             METHOD_PROBE_NODES => self.probe_nodes(params).await,
             METHOD_SELECT_NODE => self.select_node(params),
+            METHOD_LOG_TAIL => self.log_tail(params),
+            METHOD_DIAGNOSTICS => Ok(self.diagnostics()),
             other => Err(IpcError::Remote {
                 code: ERR_UNKNOWN_METHOD.to_owned(),
                 message: format!("unknown method: {other}"),
@@ -375,8 +500,14 @@ impl Handler for KernelHandler {
 
 /// 启动 IPC 服务。仅 Windows 实现；其他平台记录告警并忽略。
 #[cfg(windows)]
-pub fn spawn(pipe: String, context: Arc<AppContext>, source: reload::Source, geo: Arc<GeoData>) {
-    let handler = Arc::new(KernelHandler::new(context, source, geo));
+pub fn spawn(
+    pipe: String,
+    context: Arc<AppContext>,
+    source: reload::Source,
+    geo: Arc<GeoData>,
+    env: KernelEnv,
+) {
+    let handler = Arc::new(KernelHandler::new(context, source, geo, env));
     tracing::info!(pipe = %pipe, "ipc server listening");
     drop(tokio::spawn(async move {
         if let Err(error) = client_sidecar::ipc::pipe::serve(&pipe, handler).await {
@@ -391,6 +522,7 @@ pub fn spawn(
     _context: Arc<AppContext>,
     _source: reload::Source,
     _geo: Arc<GeoData>,
+    _env: KernelEnv,
 ) {
     tracing::warn!("--ipc-pipe is only supported on Windows");
 }

@@ -49,6 +49,8 @@ pub enum Command {
     },
     /// A2：订阅快照写入后触发内核 reload。
     Reload,
+    /// C2：导出脱敏后的内核日志尾部到本地文件。
+    ExportLogs,
 }
 
 impl Command {
@@ -166,6 +168,8 @@ pub struct State {
     pub nodes: Option<NodesSnapshot>,
     /// 最近一次全节点测速摘要，如 `3/3 reachable`。
     pub last_probe: Option<String>,
+    /// 最近一次日志导出结果（成功路径或失败原因）。
+    pub log_export: Option<String>,
     events: VecDeque<GuiEvent>,
     probes: VecDeque<ProbeEntry>,
 }

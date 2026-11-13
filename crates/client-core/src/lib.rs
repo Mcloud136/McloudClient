@@ -14,6 +14,7 @@ pub mod ipc;
 pub mod metrics;
 pub mod outbound;
 pub mod profile;
+pub mod redact;
 pub mod relay;
 pub mod reload;
 pub mod router;

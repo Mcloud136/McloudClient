@@ -14,6 +14,8 @@ pub const METHOD_NODE_PROBE: &str = "node_probe";
 pub const METHOD_NODES: &str = "nodes";
 pub const METHOD_PROBE_NODES: &str = "probe_nodes";
 pub const METHOD_SELECT_NODE: &str = "select_node";
+pub const METHOD_LOG_TAIL: &str = "log_tail";
+pub const METHOD_DIAGNOSTICS: &str = "diagnostics";
 
 /// 本轮已实现并可实机验证的方法。
 pub const IMPLEMENTED_METHODS: &[&str] = &[
@@ -24,10 +26,12 @@ pub const IMPLEMENTED_METHODS: &[&str] = &[
     METHOD_NODES,
     METHOD_PROBE_NODES,
     METHOD_SELECT_NODE,
+    METHOD_LOG_TAIL,
+    METHOD_DIAGNOSTICS,
 ];
 
-/// 契约已定义、实现留到 C1 后续里程碑的方法。
-pub const PLANNED_METHODS: &[&str] = &["log_tail", "diagnostics"];
+/// 契约已定义、尚未实现的方法（当前为空）。
+pub const PLANNED_METHODS: &[&str] = &[];
 
 pub const ERR_UNKNOWN_METHOD: &str = "unknown_method";
 pub const ERR_INVALID_PARAMS: &str = "invalid_params";
@@ -40,6 +44,10 @@ pub const AUTO_NODE: &str = "auto";
 
 pub const DEFAULT_PROBE_TIMEOUT_MS: u64 = 2_000;
 pub const MAX_PROBE_TIMEOUT_MS: u64 = 10_000;
+
+/// `log_tail` 默认 / 最大行数（脱敏后下发）。
+pub const DEFAULT_LOG_TAIL_LINES: usize = 200;
+pub const MAX_LOG_TAIL_LINES: usize = 1000;
 
 fn default_probe_timeout() -> u64 {
     DEFAULT_PROBE_TIMEOUT_MS
@@ -187,6 +195,21 @@ pub struct ProbeNodesResult {
     pub results: Vec<NodeProbeOutcome>,
 }
 
+/// `log_tail` 请求；`lines` 省略取默认 200，越界返回 `invalid_params`。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogTailParams {
+    #[serde(default)]
+    pub lines: Option<usize>,
+}
+
+/// `log_tail` 响应；所有行已经过脱敏（节点地址/UUID/加密串/订阅链接）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogTailResult {
+    pub requested: usize,
+    pub returned: usize,
+    pub lines: Vec<String>,
+}
+
 /// 仅允许回环目标，防止 IPC 被用作任意内网探测。
 ///
 /// 要求严格的 `host:port`；host 必须是 `localhost` 或能解析为 loopback 的 IP 字面量，
@@ -264,7 +287,7 @@ mod tests {
         for method in PLANNED_METHODS {
             assert!(!IMPLEMENTED_METHODS.contains(method));
         }
-        assert_eq!(IMPLEMENTED_METHODS.len(), 7);
+        assert_eq!(IMPLEMENTED_METHODS.len(), 9);
     }
 
     #[test]

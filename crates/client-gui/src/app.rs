@@ -109,6 +109,7 @@ pub enum Message {
     ProbeInput(String),
     Probe,
     ProbeNodes,
+    ExportLogs,
     LockNode(String, String),
     AutoNode(String),
     SessionCheck(Result<bool, String>),
@@ -168,6 +169,7 @@ struct ViewModel {
     kernel: Option<crate::state::MetricsView>,
     nodes: Option<crate::state::NodesView>,
     last_probe: Option<String>,
+    log_export: Option<String>,
     probes: Vec<crate::state::ProbeView>,
     events: Vec<crate::state::EventView>,
     last_refresh: Instant,
@@ -427,6 +429,9 @@ impl Application for TrayApp {
             }
             Message::ProbeNodes => {
                 let _ = handles().commands.send(Command::probe_nodes());
+            }
+            Message::ExportLogs => {
+                let _ = handles().commands.send(Command::ExportLogs);
             }
             Message::LockNode(group, node) => {
                 let _ = handles().commands.send(Command::select(group, node));
@@ -752,6 +757,7 @@ impl TrayApp {
                     .collect(),
             }),
             last_probe: snapshot.last_probe.clone(),
+            log_export: snapshot.log_export.clone(),
             probes: snapshot
                 .probes_recent_first()
                 .into_iter()
@@ -1479,6 +1485,15 @@ fn proxy_view(vm: &ViewModel, context: &mut ViewContext<MainWindow>) -> View {
             ))
             .into(),
     ];
+    probe_items.push(
+        Button::new()
+            .on_click(context.message(Message::ExportLogs))
+            .content("导出日志")
+            .into(),
+    );
+    if let Some(export) = &vm.log_export {
+        probe_items.push(kv("日志导出", export));
+    }
     for probe in &vm.probes {
         let status = if probe.reachable {
             probe

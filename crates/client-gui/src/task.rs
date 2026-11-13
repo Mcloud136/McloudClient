@@ -26,9 +26,9 @@ use client_sidecar::IpcError;
 use client_sidecar::IpcTransport;
 #[cfg(windows)]
 use client_sidecar::contract::{
-    METHOD_METRICS, METHOD_NODE_PROBE, METHOD_NODES, METHOD_PROBE_NODES, METHOD_RELOAD,
-    METHOD_SELECT_NODE, Metrics, NodeProbeParams, NodeProbeResult, NodesSnapshot, ProbeNodesParams,
-    ProbeNodesResult, SelectNodeParams,
+    LogTailResult, MAX_LOG_TAIL_LINES, METHOD_LOG_TAIL, METHOD_METRICS, METHOD_NODE_PROBE,
+    METHOD_NODES, METHOD_PROBE_NODES, METHOD_RELOAD, METHOD_SELECT_NODE, Metrics, NodeProbeParams,
+    NodeProbeResult, NodesSnapshot, ProbeNodesParams, ProbeNodesResult, SelectNodeParams,
 };
 #[cfg(windows)]
 use client_sidecar::ipc::pipe::PipeClient;
@@ -226,6 +226,14 @@ async fn session(
                             }
                         }
                     }
+                    Some(Command::ExportLogs) => {
+                        if let Err(error) = run_export_logs(client, state, wake).await {
+                            if is_connection_error(&error) {
+                                return error.to_string();
+                            }
+                            tracing::warn!(%error, "log export command failed");
+                        }
+                    }
                     None => return "command channel closed".to_owned(),
                 }
             }
@@ -260,6 +268,51 @@ async fn session(
                 }
             }
         }
+    }
+}
+
+/// C2：请求脱敏日志尾部并写入用户文档目录；结果（路径或失败原因）回写状态。
+#[cfg(windows)]
+async fn run_export_logs(
+    client: &PipeClient,
+    state: &Arc<SharedState>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+) -> Result<(), IpcError> {
+    let value = client
+        .request(
+            METHOD_LOG_TAIL,
+            serde_json::json!({ "lines": MAX_LOG_TAIL_LINES }),
+        )
+        .await?;
+    let parsed: LogTailResult =
+        serde_json::from_value(value).map_err(|error| IpcError::Remote {
+            code: "serialize_failed".to_owned(),
+            message: error.to_string(),
+        })?;
+    let message = write_export_file(&parsed);
+    state.update(|s| s.log_export = Some(message));
+    wake();
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_export_file(result: &LogTailResult) -> String {
+    let profile = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_owned());
+    let dir = std::path::Path::new(&profile).join("Documents");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("McloudClient-logs-{ts}.txt"));
+    let write =
+        std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, result.lines.join("\n")));
+    match write {
+        Ok(()) => format!(
+            "已导出 {} 行（已脱敏）：{}",
+            result.returned,
+            path.display()
+        ),
+        Err(error) => format!("导出失败: {error}"),
     }
 }
 

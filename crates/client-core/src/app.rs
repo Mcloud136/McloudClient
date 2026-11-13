@@ -36,7 +36,22 @@ pub async fn run(config: Config, mut shutdown: watch::Receiver<bool>) -> Result<
     // 控制面接口：仅在显式指定管道名时启用，缺省不改变原有行为。
     match (&config.ipc_pipe, source.clone()) {
         (Some(pipe), Some(source)) => {
-            ipc::spawn(pipe.clone(), Arc::clone(&context), source, Arc::clone(&geo));
+            ipc::spawn(
+                pipe.clone(),
+                Arc::clone(&context),
+                source,
+                Arc::clone(&geo),
+                ipc::KernelEnv {
+                    log_path: Some(crate::logging::current_path(
+                        &config
+                            .log_dir
+                            .clone()
+                            .unwrap_or_else(crate::logging::default_dir),
+                        "core",
+                    )),
+                    dns_enabled: config.dns_listen.is_some(),
+                },
+            );
         }
         (Some(_), None) => tracing::warn!("--ipc-pipe ignored in single-node mode"),
         (None, _) => {}

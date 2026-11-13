@@ -291,7 +291,7 @@ Authenticated { account: AccountView, subscription: SubscriptionView }
 | `--source` / `--source-url` CLI | 保留为兼容 / 离线入口；账号登录成功后**覆盖**当前 source，登出后不自动回退 |
 | `status` / `reload` / 事件推送 | 语义不变；订阅变更仍走 `reload` 的 `applied` / `rejected` 事件 |
 | `metrics` / `nodes` / `probe_nodes` / `select_node` | 不变，代理页继续消费 |
-| `log_tail` / `diagnostics` | 仍为规划方法；实现时必须把账号相关字段加入脱敏规则 |
+| `log_tail` / `diagnostics` | ✅ 已实现（2026-11-13，契约 v1.2）。`log_tail` 只读**内核**日志（L2：内核不产生账号数据），账号字段不入脱敏面；面板秘密由 GUI 导出文件的零命中断言守护（`verify_export.ps1`） |
 
 ---
 
