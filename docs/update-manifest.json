@@ -1,5 +1,6 @@
 {
-  "version": "0.1.0",
-  "url": "",
-  "sha256": ""
+  "sha256": "a0485f537e971779025b1d8ceb1a9287d7d966a12dbd5ed2924dfd303153f9f0",
+  "signature": "75571c7e8cce8fa08faf80da8c3b58bfe3d01f65adddb6ba835574dc5535c1ed3ed3da12f2e5d698d2e4466bdbccd2618ef9fd84c4e9b627c0dca848c8ca8102",
+  "url": "https://github.com/Mcloud136/McloudClient/releases/download/v0.1.0/McloudClient-Setup-0.1.0.exe",
+  "version": "0.1.0"
 }
