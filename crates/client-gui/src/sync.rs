@@ -67,7 +67,9 @@ impl SubscriptionSync {
             return Ok(SyncOutcome::Unchanged);
         }
         validate(&bytes)?;
-        // 重并入用户自定义规则（独立文件），避免订阅同步覆盖规则编辑。
+        // 持久化订阅原始基底（合并的唯一订阅来源），再重并入用户规则。
+        crate::rules_edit::save_subscription_base(&self.dir, &bytes)
+            .context("save subscription base")?;
         let merged = crate::rules_edit::reapply_user_rules(&self.dir, &bytes)
             .context("reapply user rules")?;
         let seq = self.store.write(&merged).context("snapshot write")?;

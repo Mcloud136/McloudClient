@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 
 /// 用户规则文件名（与快照同目录，独立于订阅 `live.json`）。
 pub const USER_RULES_FILE: &str = "user-rules.json";
+/// 订阅原始 profile 基底文件名：合并的唯一订阅来源，与用户规则分离，
+/// 避免「以已合并快照为基底」导致旧用户规则累积。
+pub const SUBSCRIPTION_BASE_FILE: &str = "subscription-base.json";
 
 /// 用户规则文件载荷：仅一个可选 `rules` 数组（新增字段可选/有默认值，旧版忽略）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,6 +138,61 @@ pub fn reapply_user_rules(snapshot_dir: &Path, subscription_bytes: &[u8]) -> Res
         return Ok(subscription_bytes.to_vec());
     }
     merge_rules(subscription_bytes, &user.rules)
+}
+
+/// 订阅原始基底文件路径。
+#[must_use]
+pub fn subscription_base_path(snapshot_dir: &Path) -> PathBuf {
+    snapshot_dir.join(SUBSCRIPTION_BASE_FILE)
+}
+
+/// 原子写订阅原始基底（同步拉取到的未合并 profile）。
+///
+/// # Errors
+///
+/// 目录创建或写入失败时返回错误。
+pub fn save_subscription_base(snapshot_dir: &Path, bytes: &[u8]) -> Result<()> {
+    std::fs::create_dir_all(snapshot_dir).context("subscription-base dir")?;
+    let path = subscription_base_path(snapshot_dir);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).context("subscription-base tmp write")?;
+    std::fs::rename(&tmp, &path).context("subscription-base rename")?;
+    Ok(())
+}
+
+/// 读取订阅原始基底；不存在返回 `None`（旧安装兼容）。
+///
+/// # Errors
+///
+/// 文件存在但读取失败时返回错误。
+pub fn load_subscription_base(snapshot_dir: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(subscription_base_path(snapshot_dir)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("subscription-base read"),
+    }
+}
+
+/// 解析「纯订阅」合并基底：优先用持久化基底文件；旧安装无基底文件时，
+/// 从当前快照确定性剥离已保存的用户规则前缀回退，避免把旧用户规则当成订阅内容。
+///
+/// # Errors
+///
+/// 基底/快照读取或 JSON 解析失败时返回错误。
+pub fn resolve_subscription_base(snapshot_dir: &Path, current_bytes: &[u8]) -> Result<Vec<u8>> {
+    if let Some(base) = load_subscription_base(snapshot_dir)? {
+        return Ok(base);
+    }
+    let user = load_user_rules(snapshot_dir)?;
+    if user.rules.is_empty() {
+        return Ok(current_bytes.to_vec());
+    }
+    let mut profile: Profile =
+        serde_json::from_slice(current_bytes).context("current profile json")?;
+    if profile.rules.starts_with(&user.rules[..]) {
+        profile.rules.drain(..user.rules.len());
+    }
+    serde_json::to_vec(&profile).context("stripped profile serialize")
 }
 
 #[cfg(test)]
@@ -254,6 +312,64 @@ mod tests {
         .expect("write");
         let user = load_user_rules(&dir).expect("load");
         assert_eq!(user.rules, vec!["MATCH,DIRECT"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 模拟一次「编辑并落快照」：resolve 基底 → prepare_edit → 写为 current 字节。
+    fn edit_round(dir: &Path, prev_snapshot: &[u8], text: &str) -> Vec<u8> {
+        let base = resolve_subscription_base(dir, prev_snapshot).expect("resolve base");
+        prepare_edit(dir, &base, text).expect("prepare")
+    }
+
+    #[test]
+    fn second_edit_replaces_not_accumulates() {
+        // 缺陷回归：以已合并快照为基底会把旧用户规则累积进来。
+        let dir = temp_dir("no-accum");
+        save_subscription_base(&dir, SUB.as_bytes()).expect("save base");
+        let first = edit_round(&dir, SUB.as_bytes(), "DOMAIN,first.test,DIRECT");
+        let second = edit_round(&dir, &first, "DOMAIN,second.test,DIRECT");
+        let profile: Profile = serde_json::from_slice(&second).expect("parse");
+        assert_eq!(
+            profile.rules,
+            vec!["DOMAIN,second.test,DIRECT", "MATCH,g"],
+            "旧用户规则必须被替换而非累积"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_text_removes_all_user_rules() {
+        let dir = temp_dir("clear");
+        save_subscription_base(&dir, SUB.as_bytes()).expect("save base");
+        let first = edit_round(&dir, SUB.as_bytes(), "DOMAIN,x.test,DIRECT");
+        let cleared = edit_round(&dir, &first, "  \n# only comment\n");
+        let profile: Profile = serde_json::from_slice(&cleared).expect("parse");
+        assert_eq!(profile.rules, vec!["MATCH,g"], "清空文本必须清除用户规则");
+        assert!(load_user_rules(&dir).expect("load").rules.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_base_strips_user_prefix_for_old_install() {
+        // 旧安装无基底文件：从已合并快照确定性剥离用户规则前缀。
+        let dir = temp_dir("old-install");
+        save_user_rules(&dir, &["DOMAIN,legacy.test,DIRECT".into()]).expect("save user");
+        let merged =
+            merge_rules(SUB.as_bytes(), &["DOMAIN,legacy.test,DIRECT".into()]).expect("merge");
+        let base = resolve_subscription_base(&dir, &merged).expect("resolve");
+        let profile: Profile = serde_json::from_slice(&base).expect("parse");
+        assert_eq!(profile.rules, vec!["MATCH,g"], "回退剥离应还原纯订阅");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_base_prefers_persisted_base_file() {
+        let dir = temp_dir("prefer-base");
+        save_subscription_base(&dir, SUB.as_bytes()).expect("save base");
+        // current 是含用户规则的合并产物，但基底文件优先。
+        let merged = merge_rules(SUB.as_bytes(), &["DOMAIN,u.test,DIRECT".into()]).expect("merge");
+        let base = resolve_subscription_base(&dir, &merged).expect("resolve");
+        assert_eq!(base, SUB.as_bytes());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

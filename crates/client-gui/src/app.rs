@@ -111,6 +111,7 @@ pub enum Message {
     ProbeNodes,
     ExportLogs,
     RulesInput(String),
+    RulesPrefill(String),
     ApplyRules,
     RulesDone(Result<u64, String>),
     LockNode(String, String),
@@ -259,6 +260,7 @@ struct TrayApp {
     probe_input: String,
     rules_text: String,
     rules_status: String,
+    rules_started: Option<Instant>,
     last_check: Instant,
     last_refresh: Instant,
     last_update: Option<Instant>,
@@ -298,6 +300,7 @@ impl Application for TrayApp {
             probe_input: input.probe_default.clone(),
             rules_text: String::new(),
             rules_status: String::new(),
+            rules_started: None,
             last_check: Instant::now(),
             last_refresh: Instant::now(),
             last_update: None,
@@ -443,8 +446,15 @@ impl Application for TrayApp {
                 let _ = handles().commands.send(Command::ExportLogs);
             }
             Message::RulesInput(value) => self.rules_text = value,
+            Message::RulesPrefill(text) => {
+                // 启动回显：仅当文本框为空时填入已保存用户规则，不覆盖用户正在编辑的内容。
+                if self.rules_text.is_empty() {
+                    self.rules_text = text;
+                }
+            }
             Message::RulesDone(Ok(seq)) => {
                 self.rules_status = format!("规则已应用（快照 v{seq}），等待内核生效");
+                self.rules_started = Some(Instant::now());
             }
             Message::RulesDone(Err(error)) => {
                 self.rules_status = format!("规则未应用：{error}");
@@ -608,6 +618,19 @@ impl Application for TrayApp {
                         .find(|e| e.kind == "reload" && e.summary.starts_with("applied"));
                     if applied.is_some_and(|event| event.received >= self.sync_started) {
                         self.sync_state = SyncState::Synced(seq);
+                    }
+                }
+                // 规则编辑生效终态：reload applied 事件晚于规则应用时刻 → 已生效。
+                if let Some(started) = self.rules_started {
+                    let applied = handles()
+                        .shared
+                        .snapshot()
+                        .events_recent_first()
+                        .into_iter()
+                        .find(|e| e.kind == "reload" && e.summary.starts_with("applied"));
+                    if applied.is_some_and(|event| event.received >= started) {
+                        self.rules_status = "规则已生效（内核已重载）".to_owned();
+                        self.rules_started = None;
                     }
                 }
             }
@@ -875,6 +898,21 @@ impl Component for MainWindow {
                 Message::LoginDone(result.map_err(|e| e.to_string()))
             });
         }
+        // 规则回显：启动时读已保存用户规则预填文本框（仅空时生效，见 RulesPrefill）。
+        let sync = Arc::clone(&handles().sync);
+        context.spawn_background(move |_| {
+            let text = block_on_panel(async {
+                let guard = sync.lock().await;
+                let dir = guard.dir().to_path_buf();
+                let user = crate::rules_edit::load_user_rules(&dir)
+                    .map_err(|e| PanelError::Network(e.to_string()))?;
+                Ok(user.rules.join("\n"))
+            });
+            match text {
+                Ok(t) if !t.is_empty() => Message::RulesPrefill(t),
+                _ => Message::RulesPrefill(String::new()),
+            }
+        });
         Self {
             closed: input.closed.clone(),
         }
@@ -1179,10 +1217,13 @@ fn spawn_apply_rules(context: &ComponentContext<MainWindow>, text: String) {
         let result = block_on_panel(async {
             let mut guard = sync.lock().await;
             let dir = guard.dir().to_path_buf();
-            let subscription = guard
+            let current = guard
                 .current_bytes()
                 .map_err(|e| PanelError::Network(e.to_string()))?
                 .ok_or_else(|| PanelError::Network("尚未同步订阅，无法编辑规则".to_owned()))?;
+            // 合并基底必须是「纯订阅」而非已合并快照，否则旧用户规则会累积。
+            let subscription = crate::rules_edit::resolve_subscription_base(&dir, &current)
+                .map_err(|e| PanelError::Network(e.to_string()))?;
             let merged = crate::rules_edit::prepare_edit(&dir, &subscription, &text)
                 .map_err(|e| PanelError::Network(e.to_string()))?;
             let seq = guard

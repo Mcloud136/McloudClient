@@ -195,19 +195,29 @@
 
 **规则编辑架构（C2，GUI 侧）**：
 
-- 用户自定义规则存**独立文件** `<快照目录>/user-rules.json`（`{"rules":[...]}`），
-  不混入订阅 `live.json`（`client-design-plan.md` §FA 前置规格二：UI 偏好独立文件）。
-- 应用流程：GUI 读当前快照 → 用户规则**前置**合并订阅规则 → 用内核同一套
-  `Router::from_profile` 校验（geo 空数据，与服务形态一致）→ 通过才写
-  `user-rules.json` + 合并快照 → IPC `reload` 生效；校验失败不写任何文件。
-- 订阅同步（`sync_once`）自动重并入已保存的用户规则，订阅更新不丢编辑。
+- 三类文件分离（守 `client-design-plan.md` §FA 前置规格二「UI 偏好独立文件」）：
+  - `subscription-base.json`：**订阅原始 profile**（同步拉取的未合并字节），是合并的唯一订阅基底；
+  - `user-rules.json`：用户自定义规则（`{"rules":[...]}`），UI 偏好；
+  - `live.json`/编号快照：合并产物（用户规则前置 + 订阅规则），内核读取。
+- 应用流程：GUI 取**纯订阅基底**（`subscription-base.json`；旧安装无此文件时从当前快照
+  确定性剥离已保存用户规则前缀回退）→ 用户规则**前置**合并 → 用内核同一套
+  `Router::from_profile` 校验 → 通过才写 `user-rules.json` + 合并快照 → IPC `reload` 生效；
+  校验失败不写任何文件。**严禁以已合并快照为基底**，否则二次编辑会累积旧用户规则（已修复并有回归测试）。
+- 编辑语义：文本框即用户规则全集——二次编辑**替换**旧用户规则，清空文本**清除**全部用户规则。
+- 订阅同步（`sync_once`）持久化订阅基底并自动重并入用户规则，订阅更新不丢编辑。
+- GUI 启动回显已保存用户规则（仅文本框为空时预填）；应用后状态经 reload applied 事件
+  从「已应用（等待生效）」收敛到「已生效（内核已重载）」终态。
+- **已知校验限制**（与服务形态对齐的有意取舍）：校验用空 geo 数据，故 `GEOIP/GEOSITE` 规则
+  会被拒绝（服务 binPath 不带 `--geoip/--geosite`）；若内核以 CLI 带 geo 数据运行，GUI 校验
+  口径会偏严。`RULE-SET` 相对路径在 GUI 进程 cwd 下展开，可能与内核 cwd 不一致——首版仅支持
+  绝对路径 rule-provider。两者列为后续增强，不影响 DOMAIN/IP-CIDR/MATCH 等常用规则。
 - **快照兼容矩阵**（FA 需实机复核，单测已覆盖）：
-  - 旧内核读新快照：合并产物本身是合法 profile，正常构建；`user-rules.json` 被忽略；
-  - 新 GUI 读旧快照：无 `user-rules.json` 时回退纯订阅规则；
-  - `user-rules.json` 含未知字段：serde 忽略（新增字段可选/有默认值）。
+  - 旧内核读新快照：合并产物本身是合法 profile，正常构建；`user-rules.json`/`subscription-base.json` 被忽略；
+  - 新 GUI 读旧快照：无 `user-rules.json` 回退纯订阅规则；无 `subscription-base.json` 从快照剥离用户规则前缀回退；
+  - 两文件含未知字段：serde 忽略（新增字段可选/有默认值）。
 - 实机证据：`_c0d_test/s14_rules_probe.py` 9/9（get_rules/reload 继承/用户规则前置/脱敏）；
-  `_gui_spike/run_rules.sh` + `verify_rules.ps1` PASS（登录→同步→非法拒绝无副作用→
-  合法应用持久化合并→内核日志 `router reloaded rules=6` 硬断言）。
+  `_gui_spike/run_rules.sh` + `verify_rules.ps1` **9 步 PASS**（登录→同步→非法拒绝无副作用→
+  合法合并 6 规则→内核 reload 硬断言→**二次编辑替换不累积→重启回显→清空清除内核回 5**）。
 
 ## 5. 错误码
 
