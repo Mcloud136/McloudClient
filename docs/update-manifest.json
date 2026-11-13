@@ -1,6 +1,6 @@
 {
-  "sha256": "a0485f537e971779025b1d8ceb1a9287d7d966a12dbd5ed2924dfd303153f9f0",
-  "signature": "75571c7e8cce8fa08faf80da8c3b58bfe3d01f65adddb6ba835574dc5535c1ed3ed3da12f2e5d698d2e4466bdbccd2618ef9fd84c4e9b627c0dca848c8ca8102",
-  "url": "https://github.com/Mcloud136/McloudClient/releases/download/v0.1.0/McloudClient-Setup-0.1.0.exe",
-  "version": "0.1.0"
+  "sha256": "aa85fca38caec33df4ef03cf10bab9f63cfb6ce3a07084bf6d18c5eef61da757",
+  "signature": "fbebc4f7a682dd07ce7dee436c6e0f36bb49bcbb23494540c273f22f158fbeeb4b19c1ac3d104bec83e12060aa66bfb756d024980048bcafd20c84df9d786008",
+  "url": "https://github.com/Mcloud136/McloudClient/releases/download/v0.1.1/McloudClient-Setup-0.1.1.exe",
+  "version": "0.1.1"
 }

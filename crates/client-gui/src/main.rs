@@ -63,11 +63,8 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:1080")]
     proxy_target: String,
 
-    /// 更新 manifest URL（实机回归可指向 mock 面板）。
-    #[arg(
-        long,
-        default_value = "https://raw.githubusercontent.com/Mcloud136/McloudClient/main/docs/update-manifest.json"
-    )]
+    /// 更新 manifest URL 覆盖（实机回归指向 mock 面板）；缺省为空 = 按用户更新源走多渠道。
+    #[arg(long, default_value = "")]
     update_manifest: String,
 }
 

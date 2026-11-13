@@ -18,11 +18,12 @@ use tokio_rustls::TlsConnector;
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
 
-/// HTTP 响应：状态码 + 原始 body。业务层自行解释 JSON 与错误码。
+/// HTTP 响应：状态码 + 原始 body + 响应头（小写名）。业务层自行解释 JSON 与错误码。
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub headers: Vec<(String, String)>,
 }
 
 /// 拉取一次订阅内容（支持 `http://` 与 `https://`），要求 200。
@@ -48,6 +49,55 @@ pub async fn fetch_url(url: &str) -> Result<Vec<u8>> {
 ///
 /// URL 非法、头非法、连接/TLS/读写失败或响应格式错误时返回错误。
 pub async fn request(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&[u8]>,
+) -> Result<HttpResponse> {
+    // 有限重定向跟随（3xx + Location，上限 5 次防循环）；仅 GET 跟随，
+    // 避免 POST 重定向改变语义。Gitee raw 会 302 到 raw.giteeusercontent.com。
+    let mut current = url.to_owned();
+    for _ in 0..5 {
+        let response = request_once(method, &current, headers, body).await?;
+        if method == "GET"
+            && (301..=308).contains(&response.status)
+            && let Some(location) = header_value(&response, "location")
+        {
+            current = resolve_location(&current, &location)?;
+            continue;
+        }
+        return Ok(response);
+    }
+    bail!("too many redirects")
+}
+
+/// 从响应头取指定字段（大小写不敏感）。
+fn header_value(response: &HttpResponse, name: &str) -> Option<String> {
+    // parse_response 只保留 status/body，头需重新解析；这里从原始响应不可得，
+    // 故 request_once 在响应中附带 headers。见 HttpResponse.headers。
+    response
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.clone())
+}
+
+/// 解析 Location（支持绝对 URL 与相对路径）。
+fn resolve_location(base: &str, location: &str) -> Result<String> {
+    if location.contains("://") {
+        return Ok(location.to_owned());
+    }
+    let (scheme, rest) = base.split_once("://").context("base url scheme")?;
+    let authority = rest.split('/').next().context("base url authority")?;
+    if location.starts_with('/') {
+        Ok(format!("{scheme}://{authority}{location}"))
+    } else {
+        let base_path = base.rsplit_once('/').map(|(p, _)| p).unwrap_or(base);
+        Ok(format!("{base_path}/{location}"))
+    }
+}
+
+async fn request_once(
     method: &str,
     url: &str,
     headers: &[(String, String)],
@@ -148,13 +198,17 @@ fn parse_response(raw: &[u8]) -> Result<HttpResponse> {
         .context("invalid HTTP status code")?;
     let mut chunked = false;
     let mut length: Option<usize> = None;
+    let mut headers = Vec::new();
     for line in lines {
         if let Some((key, value)) = line.split_once(':') {
-            match key.trim().to_ascii_lowercase().as_str() {
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim().to_owned();
+            match key.as_str() {
                 "transfer-encoding" if value.contains("chunked") => chunked = true,
-                "content-length" => length = value.trim().parse().ok(),
+                "content-length" => length = value.parse().ok(),
                 _ => {}
             }
+            headers.push((key, value));
         }
     }
     let body = &raw[split + 4..];
@@ -166,7 +220,11 @@ fn parse_response(raw: &[u8]) -> Result<HttpResponse> {
             None => body.to_vec(),
         }
     };
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse {
+        status,
+        body,
+        headers,
+    })
 }
 
 fn decode_chunked(mut data: &[u8]) -> Result<Vec<u8>> {
@@ -302,5 +360,61 @@ mod tests {
         server.await.expect("server");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, br#"{"data":{"ok":true}}"#);
+    }
+
+    #[test]
+    fn resolve_location_absolute_and_relative() {
+        use super::resolve_location;
+        assert_eq!(
+            resolve_location("https://a.com/x", "https://b.com/y").expect("abs"),
+            "https://b.com/y"
+        );
+        assert_eq!(
+            resolve_location("https://a.com/x/y", "/z").expect("root"),
+            "https://a.com/z"
+        );
+        assert_eq!(
+            resolve_location("https://a.com/x/y", "z").expect("rel"),
+            "https://a.com/x/z"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_follows_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            // 第一次请求 → 302 到 /final；第二次 → 200。
+            for i in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut tmp).await.expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf);
+                let response = if i == 0 {
+                    assert!(head.starts_with("GET /start "));
+                    b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n".to_vec()
+                } else {
+                    assert!(head.starts_with("GET /final "));
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone".to_vec()
+                };
+                socket.write_all(&response).await.expect("write");
+            }
+        });
+        let response = request("GET", &format!("http://{addr}/start"), &[], None)
+            .await
+            .expect("request");
+        server.await.expect("server");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"done");
     }
 }

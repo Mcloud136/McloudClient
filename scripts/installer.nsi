@@ -6,7 +6,7 @@
 !include "MUI2.nsh"
 
 Name "McloudClient"
-OutFile "..\target\installer\McloudClient-Setup-0.1.0.exe"
+OutFile "..\target\installer\McloudClient-Setup-0.1.1.exe"
 InstallDir "$PROGRAMFILES64\McloudClient"
 RequestExecutionLevel admin
 Unicode true
@@ -81,7 +81,7 @@ Section "Install"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "DisplayName" "McloudClient"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "DisplayVersion" "0.1.0"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "DisplayVersion" "0.1.1"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\McloudClient" "Publisher" "Mcloud136"
   ; 服务由拉起的 GUI 补启动（长生命周期进程，避免安装器退出竞态）。
   Exec '"$INSTDIR\client-gui.exe" --pipe \\.\pipe\mcloud-client'

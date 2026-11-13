@@ -1,28 +1,32 @@
-# 功能冻结 pin 清单 — v0.1.0（FA 长稳二进制锚点）
+# 功能冻结 pin 清单 — v0.1.1（FA 长稳二进制锚点）
 
 > 冻结日期：2026-11-13。本清单锚定 C0–C2 功能冻结后的 release 二进制，
 > 作为 24 h 长稳与 FA 最终验收的被测对象。**冻结后任何代码变更使长稳数据失效，必须重跑。**
 > 本清单只 pin 基线，不含发布用签名 manifest（发布 manifest 属 C3 前置，另行生成）。
+>
+> **v0.1.1 取代 v0.1.0**：v0.1.0 冻结后发现两处缺陷并修复（属代码变更，故重新冻结）：
+> ① `--update-manifest` 默认值非空导致 Gitee 优先多源逻辑被旁路（实际只查 GitHub）；
+> ② fetch 不跟随 HTTP 重定向，Gitee raw 302 到 raw.giteeusercontent.com 时失败。
+> 修复后版本 bump 0.1.1，重新统一构建 + 冒烟 + pin。v0.1.0 tag 保留作历史，不再作长稳锚点。
 
 ## 基线
 
 | 项 | 值 |
 |---|---|
-| 版本 | 0.1.0 |
-| 基线 commit | `057d22463c5df163349928a55e28af924ca92530` |
-| tag | `v0.1.0`（含本清单的提交上） |
+| 版本 | 0.1.1 |
+| tag | `v0.1.1`（含本清单的提交上） |
 | 渠道 | GitHub `Mcloud136/McloudClient` + Gitee `wxbns/mcloud-client`（同步） |
 
-## 二进制 SHA-256（release，统一重建于 2026-11-13 18:12–18:13）
+## 二进制 SHA-256（release，统一重建于 2026-11-13 19:33）
 
 | 产物 | SHA-256 | 字节 |
 |---|---|---|
-| client-core.exe | `a2d727c4e4fc5d90251d3fa2d24a78d888d7a63870774d8d747227cd3fa2d3cc` | 8301056 |
-| client-gui.exe | `f1f9282646a4f966a8b6d170d8352391219fe147fb4eb6e36ff39d920086eda7` | 10287104 |
-| sidecar.exe | `18ead5a3dd159af544387e05307c0df6f4c7081a1f13184d662d97dcef426ca8` | 5442048 |
-| McloudClient-Setup-0.1.0.exe | `a0485f537e971779025b1d8ceb1a9287d7d966a12dbd5ed2924dfd303153f9f0` | 9986768 |
+| client-core.exe | `a989ecfdf02bf7758c7fa17f9a6b0cbc2d7f846eb162b054c1948155f24b1a59` | 8384000 |
+| client-gui.exe | `4d86f9ee9afbe5a1d8f917f3d06286209d355491b0f6e01e68cfcd7de6859ef3` | 10314240 |
+| sidecar.exe | `9c7ec4f6a40fcdd1acab511cfbabf7d9756eba9c2341e4439f4f61dca0b6267d` | 5484032 |
+| McloudClient-Setup-0.1.1.exe | `aa85fca38caec33df4ef03cf10bab9f63cfb6ce3a07084bf6d18c5eef61da757` | 10039828 |
 
-归档位置（仓库外，防 `cargo clean` 丢失）：`D:\wxmuma\_freeze\v0.1.0\`，与 `target/` 产物逐字节一致（已校验）。
+归档位置（仓库外，防 `cargo clean` 丢失）：`D:\wxmuma\_freeze\v0.1.1\`，与 `target/` 产物逐字节一致（已校验）。
 
 ## 构建环境（阈值绑定本机，不跨机外推）
 
@@ -36,9 +40,10 @@
 
 ## 冻结前验证
 
-- 统一重建：core/sidecar/gui 同基线（此前 installer 为 #17 旧 GUI，不含 #18 验签，已重建修正）。
+- 统一重建：core/sidecar/gui + 安装包同基线（0.1.1）。
 - 安装器冒烟：`_c0d_test/s16_installer_probe.py` **11/11**（真实安装→服务 RUNNING→升级 previous 字节一致→升级后 RUNNING→卸载全清）。
-- 门禁：fmt / clippy `-D warnings` / test（146）/ deny 全绿；CI 双平台 + 构建机 Linux 全绿（057d224）。
+- 门禁：fmt / clippy `-D warnings` / test / deny 全绿。
+- 多源更新实机：GUI 不传 `--update-manifest`，Gitee 优先成功（无回退），首发 0.1.1 提示"已是最新版本"；fetch 跟随 Gitee raw 302 重定向。
 - 签名：GUI 内嵌 Ed25519 公钥，验签硬拒绝；实机三例（合法接受/未签名拒绝/错签名拒绝）通过。
 
 ## 失效与重跑规则
