@@ -338,7 +338,7 @@ Authenticated { account: AccountView, subscription: SubscriptionView }
 | 新增 | `A0` HTTP 扩展与 `Secret`/凭据抽象；`A1` 登录 + 主界面骨架；`A2` 订阅同步；`A3` 商店与订单；`A4` 账户管理；`A5` 安全与回归 |
 
 **关键路径变化**：账号集成成为 C1 → C2 的主线，安装器与托盘降为并行项；
-**FA 冻结时点不变**（所有功能冻结后才跑 24 h）。
+**FA 冻结时点不变**（所有功能冻结后才跑 12 h）。
 
 ---
 
