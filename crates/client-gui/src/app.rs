@@ -110,6 +110,9 @@ pub enum Message {
     Probe,
     ProbeNodes,
     ExportLogs,
+    RulesInput(String),
+    ApplyRules,
+    RulesDone(Result<u64, String>),
     LockNode(String, String),
     AutoNode(String),
     SessionCheck(Result<bool, String>),
@@ -159,6 +162,8 @@ struct ViewModel {
     sub: Option<SubDto>,
     shop: ShopVm,
     probe_input: String,
+    rules_text: String,
+    rules_status: String,
     sync_label: String,
     update_label: String,
     proxy_taken: bool,
@@ -252,6 +257,8 @@ struct TrayApp {
     account: Option<AccountView>,
     subscription: Option<Arc<SubscriptionView>>,
     probe_input: String,
+    rules_text: String,
+    rules_status: String,
     last_check: Instant,
     last_refresh: Instant,
     last_update: Option<Instant>,
@@ -289,6 +296,8 @@ impl Application for TrayApp {
             account: None,
             subscription: None,
             probe_input: input.probe_default.clone(),
+            rules_text: String::new(),
+            rules_status: String::new(),
             last_check: Instant::now(),
             last_refresh: Instant::now(),
             last_update: None,
@@ -432,6 +441,13 @@ impl Application for TrayApp {
             }
             Message::ExportLogs => {
                 let _ = handles().commands.send(Command::ExportLogs);
+            }
+            Message::RulesInput(value) => self.rules_text = value,
+            Message::RulesDone(Ok(seq)) => {
+                self.rules_status = format!("规则已应用（快照 v{seq}），等待内核生效");
+            }
+            Message::RulesDone(Err(error)) => {
+                self.rules_status = format!("规则未应用：{error}");
             }
             Message::LockNode(group, node) => {
                 let _ = handles().commands.send(Command::select(group, node));
@@ -604,6 +620,7 @@ impl Application for TrayApp {
             | Message::CancelOrder(_)
             | Message::CheckUpdate
             | Message::ApplyUpdate
+            | Message::ApplyRules
             | Message::ChangePassword => {}
         }
     }
@@ -721,6 +738,8 @@ impl TrayApp {
                 }),
             },
             probe_input: self.probe_input.clone(),
+            rules_text: self.rules_text.clone(),
+            rules_status: self.rules_status.clone(),
             sync_label,
             update_label,
             proxy_taken: self.proxy.is_taken(),
@@ -1051,6 +1070,10 @@ impl Component for MainWindow {
                     Message::UpdateChecked(result.map_err(|e| e.to_string()))
                 });
             }
+            Message::ApplyRules => {
+                let text = input.vm.rules_text.clone();
+                spawn_apply_rules(context, text);
+            }
             Message::ApplyUpdate => {
                 if let Some(info) = input.vm.update_info.clone() {
                     tracing::info!(version = %info.version, "update download start");
@@ -1147,6 +1170,31 @@ impl Component for MainWindow {
             _ => login_view(vm, context),
         }
     }
+}
+
+fn spawn_apply_rules(context: &ComponentContext<MainWindow>, text: String) {
+    let sync = Arc::clone(&handles().sync);
+    let commands = handles().commands.clone();
+    context.spawn_background(move |_| {
+        let result = block_on_panel(async {
+            let mut guard = sync.lock().await;
+            let dir = guard.dir().to_path_buf();
+            let subscription = guard
+                .current_bytes()
+                .map_err(|e| PanelError::Network(e.to_string()))?
+                .ok_or_else(|| PanelError::Network("尚未同步订阅，无法编辑规则".to_owned()))?;
+            let merged = crate::rules_edit::prepare_edit(&dir, &subscription, &text)
+                .map_err(|e| PanelError::Network(e.to_string()))?;
+            let seq = guard
+                .write_snapshot(&merged)
+                .map_err(|e| PanelError::Network(e.to_string()))?;
+            Ok(seq)
+        });
+        if result.is_ok() {
+            let _ = commands.send(Command::Reload);
+        }
+        Message::RulesDone(result.map_err(|e| e.to_string()))
+    });
 }
 
 fn spawn_sync(context: &ComponentContext<MainWindow>, url: Arc<Secret<String>>) {
@@ -1517,6 +1565,23 @@ fn proxy_view(vm: &ViewModel, context: &mut ViewContext<MainWindow>) -> View {
     if event_items.is_empty() {
         event_items.push(kv("暂无事件", ""));
     }
+    let mut rules_items: Vec<View> = vec![
+        TextBox::new()
+            .text(vm.rules_text.clone())
+            .placeholder_text(
+                "每行一条规则，如 DOMAIN-SUFFIX,example.com,DIRECT（用户规则优先于订阅规则）",
+            )
+            .accepts_return(true)
+            .on_text_changed(context.callback(|s: Rc<str>| Message::RulesInput(s.to_string())))
+            .into(),
+        Button::new()
+            .on_click(context.message(Message::ApplyRules))
+            .content("应用规则")
+            .into(),
+    ];
+    if !vm.rules_status.is_empty() {
+        rules_items.push(kv("规则状态", &vm.rules_status));
+    }
     StackPanel::new()
         .spacing(16.0)
         .margin(24.0)
@@ -1524,6 +1589,7 @@ fn proxy_view(vm: &ViewModel, context: &mut ViewContext<MainWindow>) -> View {
             panel("连接与内核", keyed(kernel_items)),
             panel("节点与负载", keyed(node_items)),
             panel("探测", keyed(probe_items)),
+            panel("分流规则", keyed(rules_items)),
             panel("事件", keyed(event_items)),
         ))
         .into()

@@ -1,7 +1,8 @@
-# C1 IPC 契约（v1.2，2026-11-13）
+# C1 IPC 契约（v1.3，2026-11-13）
 
 - **状态**：已实现并实机验证（`status` / `reload` / `metrics` / `node_probe` /
-  `nodes` / `probe_nodes` / `select_node` + **v1.2 新增 `log_tail` / `diagnostics`**）；
+  `nodes` / `probe_nodes` / `select_node` + **v1.2 新增 `log_tail` / `diagnostics`**
+  + **v1.3 新增 `get_rules`**）；
   **消费端已落地**：`crates/client-gui`（原生 WinUI 登录 + 四区 + NODES & BALANCE +
   日志导出；egui 面板与旧 s11b/s12b 探针已随 ADR 0005/0006 作废）
 - **代码单一事实源**：`crates/client-sidecar/src/contract.rs`（方法名、载荷、错误码）
@@ -43,6 +44,7 @@
 | `select_node` | ✅ v1.1 新增 | 手动锁定策略组成员 / 恢复自动（负载均衡可控） |
 | `log_tail` | ✅ v1.2 新增 | 内核环形日志尾部读取，**逐行脱敏后**下发（§4.6） |
 | `diagnostics` | ✅ v1.2 新增 | 连接统计 + DNS 路由自检 + 崩溃取证字段（§4.7） |
+| `get_rules` | ✅ v1.3 新增 | 当前生效的原始规则行（按匹配顺序）+ 配置版本（§4.8） |
 
 `IMPLEMENTED_METHODS` / `PLANNED_METHODS` 定义在 `contract.rs`，二者不允许重叠（有单测守护）。
 预研 §5 提到的 `balance_policy` 不由独立方法承担：`select_node` 负责锁定/解锁，
@@ -179,6 +181,33 @@
   IP 会走哪条规则」，**不发起任何外联、不是活体泄漏测试**。8.8.8.8 是公开知名地址，不属秘密。
 - `dns=direct` 提示 DNS 流量可能绕过代理，属**需要人工研判的线索**，不构成泄漏结论。
 - 「崩溃取证导出」由 `log_tail` 的全量脱敏导出承担，不另做独立 dump（C2 MVP 定案）。
+
+### 4.8 `get_rules`（v1.3）
+
+请求：无参数（`null` 可）。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `rules` | string[] | 原始规则行（配置顺序，**未展开 RULE-SET**），供 GUI 规则编辑回显 |
+| `version` | u64 | 配置版本（与 `status`/`metrics` 同口径，reload 成功递增） |
+
+规则行只含域名/网段/分类与策略名，不含节点地址与凭据（§6 脱敏边界）。
+
+**规则编辑架构（C2，GUI 侧）**：
+
+- 用户自定义规则存**独立文件** `<快照目录>/user-rules.json`（`{"rules":[...]}`），
+  不混入订阅 `live.json`（`client-design-plan.md` §FA 前置规格二：UI 偏好独立文件）。
+- 应用流程：GUI 读当前快照 → 用户规则**前置**合并订阅规则 → 用内核同一套
+  `Router::from_profile` 校验（geo 空数据，与服务形态一致）→ 通过才写
+  `user-rules.json` + 合并快照 → IPC `reload` 生效；校验失败不写任何文件。
+- 订阅同步（`sync_once`）自动重并入已保存的用户规则，订阅更新不丢编辑。
+- **快照兼容矩阵**（FA 需实机复核，单测已覆盖）：
+  - 旧内核读新快照：合并产物本身是合法 profile，正常构建；`user-rules.json` 被忽略；
+  - 新 GUI 读旧快照：无 `user-rules.json` 时回退纯订阅规则；
+  - `user-rules.json` 含未知字段：serde 忽略（新增字段可选/有默认值）。
+- 实机证据：`_c0d_test/s14_rules_probe.py` 9/9（get_rules/reload 继承/用户规则前置/脱敏）；
+  `_gui_spike/run_rules.sh` + `verify_rules.ps1` PASS（登录→同步→非法拒绝无副作用→
+  合法应用持久化合并→内核日志 `router reloaded rules=6` 硬断言）。
 
 ## 5. 错误码
 

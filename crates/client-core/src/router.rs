@@ -81,6 +81,8 @@ pub struct Router {
     proxies: HashMap<String, Proxy>,
     groups: HashMap<String, ProxyGroup>,
     rules: Vec<(Rule, String)>,
+    /// 原始规则行（按配置顺序，未展开 RULE-SET），供 `get_rules` 只读下发。
+    rule_lines: Vec<String>,
     round_robin: AtomicUsize,
     geo: Arc<GeoData>,
     health: HealthTable,
@@ -138,11 +140,18 @@ impl Router {
             proxies,
             groups,
             rules,
+            rule_lines,
             round_robin: AtomicUsize::new(0),
             geo,
             health: HealthTable::default(),
             selections: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// 原始规则行（按配置顺序）；只读，不含节点地址与凭据。
+    #[must_use]
+    pub fn rule_lines(&self) -> &[String] {
+        &self.rule_lines
     }
 
     /// 按规则顺序匹配目标，返回路由结果。

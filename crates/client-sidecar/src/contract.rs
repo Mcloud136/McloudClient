@@ -16,6 +16,7 @@ pub const METHOD_PROBE_NODES: &str = "probe_nodes";
 pub const METHOD_SELECT_NODE: &str = "select_node";
 pub const METHOD_LOG_TAIL: &str = "log_tail";
 pub const METHOD_DIAGNOSTICS: &str = "diagnostics";
+pub const METHOD_GET_RULES: &str = "get_rules";
 
 /// 本轮已实现并可实机验证的方法。
 pub const IMPLEMENTED_METHODS: &[&str] = &[
@@ -28,6 +29,7 @@ pub const IMPLEMENTED_METHODS: &[&str] = &[
     METHOD_SELECT_NODE,
     METHOD_LOG_TAIL,
     METHOD_DIAGNOSTICS,
+    METHOD_GET_RULES,
 ];
 
 /// 契约已定义、尚未实现的方法（当前为空）。
@@ -210,6 +212,15 @@ pub struct LogTailResult {
     pub lines: Vec<String>,
 }
 
+/// `get_rules` 响应：当前生效的规则行（按匹配顺序）与配置版本。
+///
+/// 规则行只含域名/网段/分类与策略名，不含节点地址与凭据（契约 §6）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RulesView {
+    pub rules: Vec<String>,
+    pub version: u64,
+}
+
 /// 仅允许回环目标，防止 IPC 被用作任意内网探测。
 ///
 /// 要求严格的 `host:port`；host 必须是 `localhost` 或能解析为 loopback 的 IP 字面量，
@@ -287,7 +298,7 @@ mod tests {
         for method in PLANNED_METHODS {
             assert!(!IMPLEMENTED_METHODS.contains(method));
         }
-        assert_eq!(IMPLEMENTED_METHODS.len(), 9);
+        assert_eq!(IMPLEMENTED_METHODS.len(), 10);
     }
 
     #[test]

@@ -19,10 +19,11 @@ use client_sidecar::{
     contract::{
         DEFAULT_LOG_TAIL_LINES, ERR_FORBIDDEN_TARGET, ERR_INVALID_PARAMS, ERR_UNKNOWN_GROUP,
         ERR_UNKNOWN_METHOD, ERR_UNKNOWN_NODE, LogTailParams, LogTailResult, MAX_LOG_TAIL_LINES,
-        MAX_PROBE_TIMEOUT_MS, METHOD_DIAGNOSTICS, METHOD_LOG_TAIL, METHOD_METRICS,
-        METHOD_NODE_PROBE, METHOD_NODES, METHOD_PROBE_NODES, METHOD_RELOAD, METHOD_SELECT_NODE,
-        METHOD_STATUS, NodeProbeOutcome, NodeProbeParams, NodeProbeResult, ProbeNodesParams,
-        ProbeNodesResult, SelectNodeParams, SelectNodeResult, is_loopback_target,
+        MAX_PROBE_TIMEOUT_MS, METHOD_DIAGNOSTICS, METHOD_GET_RULES, METHOD_LOG_TAIL,
+        METHOD_METRICS, METHOD_NODE_PROBE, METHOD_NODES, METHOD_PROBE_NODES, METHOD_RELOAD,
+        METHOD_SELECT_NODE, METHOD_STATUS, NodeProbeOutcome, NodeProbeParams, NodeProbeResult,
+        ProbeNodesParams, ProbeNodesResult, RulesView, SelectNodeParams, SelectNodeResult,
+        is_loopback_target,
     },
 };
 use futures::future::join_all;
@@ -225,6 +226,18 @@ impl KernelHandler {
                 .map(|m| m.len()),
         });
         body
+    }
+
+    /// 当前生效的原始规则行（只读）；规则行不含节点地址与凭据（契约 §6）。
+    fn get_rules(&self) -> Result<Value, IpcError> {
+        let view = RulesView {
+            rules: self.context.router().rule_lines().to_vec(),
+            version: self.version.load(Ordering::Relaxed),
+        };
+        serde_json::to_value(view).map_err(|error| IpcError::Remote {
+            code: "serialize_failed".to_owned(),
+            message: error.to_string(),
+        })
     }
 
     /// 策略组与节点的可观测快照（不含节点地址与凭据）。
@@ -447,6 +460,7 @@ impl Handler for KernelHandler {
             METHOD_SELECT_NODE => self.select_node(params),
             METHOD_LOG_TAIL => self.log_tail(params),
             METHOD_DIAGNOSTICS => Ok(self.diagnostics()),
+            METHOD_GET_RULES => self.get_rules(),
             other => Err(IpcError::Remote {
                 code: ERR_UNKNOWN_METHOD.to_owned(),
                 message: format!("unknown method: {other}"),

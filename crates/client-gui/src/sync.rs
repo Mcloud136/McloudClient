@@ -7,7 +7,7 @@
 //! 故非 Windows 允许 dead_code（Windows 门禁仍全量检查，单测双平台跑）。
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use client_sidecar::fetch::fetch_url;
@@ -27,6 +27,7 @@ pub enum SyncOutcome {
 /// 订阅同步器：持有快照存储与上次注入内容的哈希。
 pub struct SubscriptionSync {
     store: SnapshotStore,
+    dir: PathBuf,
     last_hash: Option<u64>,
 }
 
@@ -37,13 +38,18 @@ impl SubscriptionSync {
     ///
     /// 快照目录不可创建时返回错误。
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self> {
-        let store = SnapshotStore::new(dir, 5);
+        let dir = dir.into();
+        let store = SnapshotStore::new(dir.clone(), 5);
         store.ensure_dir().context("snapshot dir")?;
         let last_hash = match store.current() {
             Ok(Some((_, path))) => std::fs::read(&path).ok().map(|bytes| hash_bytes(&bytes)),
             _ => None,
         };
-        Ok(Self { store, last_hash })
+        Ok(Self {
+            store,
+            dir,
+            last_hash,
+        })
     }
 
     /// 拉取订阅 URL 内容并按需注入快照。
@@ -61,9 +67,43 @@ impl SubscriptionSync {
             return Ok(SyncOutcome::Unchanged);
         }
         validate(&bytes)?;
-        let seq = self.store.write(&bytes).context("snapshot write")?;
+        // 重并入用户自定义规则（独立文件），避免订阅同步覆盖规则编辑。
+        let merged = crate::rules_edit::reapply_user_rules(&self.dir, &bytes)
+            .context("reapply user rules")?;
+        let seq = self.store.write(&merged).context("snapshot write")?;
         self.last_hash = Some(new_hash);
         Ok(SyncOutcome::Changed(seq))
+    }
+
+    /// 快照目录（用户规则文件与之同目录）。
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// 读取当前生效快照的原始字节；无快照时返回 `None`。
+    ///
+    /// # Errors
+    ///
+    /// 快照目录读取失败时返回错误。
+    pub fn current_bytes(&self) -> Result<Option<Vec<u8>>> {
+        match self.store.current().context("snapshot current")? {
+            Some((_, path)) => Ok(Some(std::fs::read(&path).context("snapshot read")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 写入一份已校验的快照（规则编辑合并结果），返回序号。
+    ///
+    /// 调用方负责保证内容合法（经内核同一套 `Router::from_profile` 校验）。
+    ///
+    /// # Errors
+    ///
+    /// 快照写入失败时返回错误。
+    pub fn write_snapshot(&mut self, bytes: &[u8]) -> Result<u64> {
+        let seq = self.store.write(bytes).context("snapshot write")?;
+        self.last_hash = Some(hash_bytes(bytes));
+        Ok(seq)
     }
 }
 
